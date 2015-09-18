@@ -1,0 +1,68 @@
+@font-face {
+	font-family: 'AndaleMono';
+	font-style: normal;
+	font-weight: normal;
+	src: local('AndaleMono'), url('andalemono.woff') url('andalemono.woff') format('woff');
+}
+
+::selection { background: rgb(0, 128, 255); }
+html, body { margin: .2em; height: 100%; }
+body { font-family: AndaleMono, monospace; color: white; background-color: black; }
+
+cream {
+	color: rgb(0, 255, 0);
+	font-size: 12px;
+}
+
+cream .hidden { display: none !important; }
+
+cream output { clear: both; width: 100%; }
+cream output h3 { margin: 0px; }
+cream output pre { margin: 0px; }
+
+cream output textarea { width: 100%; height: 200px; border: none; color: inherit; font-style: inherit; font-variant: inherit; font-weight: inherit; font-stretch: inherit; font-size: inherit; line-height: inherit; font-family: inherit; outline: 0px; border-radius: 10px; padding: 5px; background-color: rgba(255, 255, 255, 0.0980392); }
+cream output textarea::selection { background: red; }
+cream output textarea::-webkit-scrollbar { width: 1ex; }
+cream output textarea::-webkit-scrollbar-thumb { border-top-width: 1px; border-top-style: solid; border-top-color: rgb(255, 255, 255); border-radius: 1ex; box-shadow: rgba(0, 0, 0, 0.4) 0px 1px 3px; background: -webkit-linear-gradient(top, rgb(240, 240, 240), rgb(210, 210, 210)) rgb(204, 204, 204); }
+
+cream inputline { display: -webkit-box; -webkit-box-orient: horizontal; -webkit-box-align: stretch; clear: both; }
+cream inputline > div:nth-child(2) { -webkit-box-flex: 1; }
+
+cream inputline input {
+	border: none;
+	color: inherit;
+	font-style: inherit;
+	font-variant: inherit;
+	font-weight: inherit;
+	font-stretch: inherit;
+	font-size: inherit;
+	line-height: inherit;
+	font-family: inherit; 
+}
+
+cream prompt {
+	white-space: nowrap;
+	margin-right: 7px;
+
+	display: -webkit-box;
+	-webkit-box-pack: center;
+	-webkit-box-orient: vertical;
+	-webkit-user-select: none;
+
+	color: #2FD0C3;
+}
+
+cream .command {
+	outline: none;
+	margin: 0px;
+	width: 100%;
+
+	border: none;
+	background-color: transparent;
+
+	color: #2FD0C3;
+}
+
+cream output line {
+	display: block;
+}
