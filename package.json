@@ -10,6 +10,7 @@
   "license": "ISC",
   "dependencies": {
     "koa-static": "^1.4.9",
-    "koa.io": "0.0.3"
+    "koa.io": "0.0.3",
+    "yub": "^0.10.10"
   }
 }

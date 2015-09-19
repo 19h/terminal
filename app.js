@@ -1,6 +1,12 @@
-var koa = require('koa.io');
+'use strict';
 
-var app = koa();
+let koa = require('koa.io');
+let app = koa();
+
+let yubi = require('yub');
+    yubi.init('24716', 'pdLmq54ttw8L01lVsMi8egPwgoY=');
+
+let users = require('./users.json');
 
 app.use(require('koa-static')('static'));
 
@@ -11,16 +17,14 @@ app.use(function*() {
 
 // middleware for scoket.io's connect and disconnect
 app.io.use(function*(next) {
-	// on connect
-	yield * next;
-	// on disconnect
+	yield* next;
 });
 
 // router for socket event
-app.io.route('new message', function*() {
-	// we tell the client to execute 'new message'
-	var message = this.args[0];
-	this.broadcast.emit('new message', message);
+app.io.route('login', function*(msg) {
+	if (this.data.length)
+
+	this.emit('hi', 'sup');
 });
 
 app.listen(3000);

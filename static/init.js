@@ -1,6 +1,6 @@
 'use strict';
 
-var events = require("./events.js");
+let events = require("./events.js");
 
 class TerminalLine {
 	constructor (message) {
@@ -67,7 +67,33 @@ class TerminalLineFeed {
 
 		let itemPos = this.lineFeed.indexOf(line);
 
-		~itemPos && this.lineFeed.splice(itemPos, 1);
+		if (~itemPos) {
+			this.lineFeed = Array.prototype.concat.call(
+				this.lineFeed.slice(0, itemPos),
+				this.lineFeed.slice(itemPos + 1, this.lineFeed.length - 1)
+			);
+		}
+	}
+
+	removeAllLines () {
+		this.lineFeed.forEach((line) => this.remove(line));
+	}
+
+	removeLastPartial () {
+		let lastCommandLine;
+
+        for (let i = this.lineFeed.length; i >= 0; --i) {
+            if (this.lineFeed[i] instanceof TerminalCommandLine) {
+                lastCommandLine = this.lineFeed[i];
+                break;
+            }
+        }
+
+        if (lastCommandLine === undefined) return;
+
+        this.lineFeed.slice(this.lineFeed.indexOf(lastCommandLine)).forEach((line) => {
+            this.remove(line);
+        })
 	}
 }
 
@@ -81,7 +107,11 @@ class Terminal extends events {
 	}
 
 	init () {
-		this._promptPrefix = 'nobody@apx:~$';
+		this.prefixMeta = {
+			name: 'nobody',
+			instance: 'apx',
+			uri: '~'
+		};
 
 		this.container = this._initContainer();
 
@@ -89,10 +119,22 @@ class Terminal extends events {
 		this.output = this.container.querySelector('output');
 
 		this.lineFeed = new TerminalLineFeed(this.output);
+		this.commandFeed = [];
 	}
 
 	_inputLine (readOnly) {
 		return new TerminalCommandLine ();
+	}
+
+	_getPromptPrefix () {
+		return this.prefixMeta.name
+			   + '@' + this.prefixMeta.instance
+			   + ':' + this.prefixMeta.uri + '$';
+	}
+	_commitPromptPrefix () {
+		let promptPrefix = this._getPromptPrefix();
+
+		this.inputLine.setPrompt(promptPrefix);
 	}
 
 	_initContainer () {
@@ -102,9 +144,9 @@ class Terminal extends events {
 		this.output = document.createElement('output');
 
 		this.inputLine = this._inputLine();
-
-		this.inputLine.setPrompt(this._promptPrefix);
 		this.inputLine.setAutofocus(true);
+
+		this._commitPromptPrefix();
 
 		document.body.appendChild(container);
 
@@ -116,11 +158,26 @@ class Terminal extends events {
 
 	registerEvents() {
 		this.command.addEventListener('keydown', (e) => {
+			if (e.metaKey) {
+				e.preventDefault();
+
+				switch (e.keyCode) {
+					case 75: return this.clearTerminal();
+					case 76: return this.partialClearTerminal();
+				}
+			}
+
 			if (e.keyCode === 13) {
+				// jump list
+				switch (this.command.value) {
+					case 'clear':
+						return this.resetTerminal();
+				}
+
 				this.command.disabled = true;
 				this.emit('command', this.command.value);
 			}
-		});
+		}, true);
 	}
 
 	// write partial message, non-exit
@@ -134,7 +191,7 @@ class Terminal extends events {
 
 		fakeInputLine.setDisabled(true);
 		fakeInputLine.setInput(this.command.value);
-		fakeInputLine.setPrompt(this._promptPrefix);
+		fakeInputLine.setPrompt(this._getPromptPrefix());
 
 		this.lineFeed.push(fakeInputLine);
 
@@ -150,19 +207,61 @@ class Terminal extends events {
 
 		this.command.focus();
 	}
+
+	// divers commands
+	clearTerminal () {
+		this.lineFeed.removeAllLines();
+	}
+
+	partialClearTerminal () {
+		this.lineFeed.removeLastPartial();
+	}
+
+	resetTerminal () {
+		this.clearTerminal();
+		this.command.value = '';
+	}
 };
 
 class apx extends events {
-	constructor() {
+	constructor () {
 		super();
 
+		this.initKeychain();
+		this.registerRealtime();
+	}
+
+	initKeychain () {
+		this.keypair = sodium.crypto_box_keypair();
+
+	}
+
+	registerRealtime () {
+		this.io = io();
+
+		this.io.on('hi', (msg) => {
+			this.initTerminal();
+		});
+
+		this.io.on('prefix', (prefix) => {
+
+		})
+
+		this.handshake();
+	}
+
+	handshake () {
+		let user = localStorage.id;
+
+		this.io.emit('login', user || '');
+	}
+
+	initTerminal () {
 		this.terminal = new Terminal();
 
 		this.terminal.on('command', (msg) => {
-			setTimeout(() => {
-				this.terminal.write('yolo');
-				this.terminal.commit();
-			}, 2000);
+			this.terminal.write('yolo\nyo\nlo');
+			this.terminal.commit();
 		});
 	}
 };
