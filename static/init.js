@@ -174,7 +174,7 @@ class Terminal extends events {
 						return this.resetTerminal();
 				}
 
-				this.command.disabled = true;
+				this.disableTerminal();
 				this.emit('command', this.command.value);
 			}
 		}, true);
@@ -222,6 +222,10 @@ class Terminal extends events {
 		this.clearTerminal();
 		this.command.value = '';
 	}
+
+	disableTerminal () {
+		this.command.disabled = true;
+	}
 };
 
 class apx extends events {
@@ -231,24 +235,38 @@ class apx extends events {
 		this.initKeychain();
 		this.registerRealtime();
 
-		this.initTerminal();
+		if (localStorage.id) {
+			this.handshake();
+		} else {
+			this.initTerminal();
+		}
 	}
 
 	initKeychain () {
 		this.keypair = sodium.crypto_box_keypair();
 		this.nonce = sodium.randombytes_buf(32);
 
-		let secret = location.hash.slice(1);
+		let secret = String(location.hash.slice(1));
 		this.secret = sodium.crypto_generichash(32, secret, this.nonce);
 
+		// overwrite secret
+		for(let i = 0; i < 30; ++i)
+			secret = String.fromCharCode.apply(String, sodium.randombytes_buf(64));
+
 		this.authedHandshake = sodium.crypto_auth(this.keypair.publicKey, this.secret);
+	}
+
+	initSecureChannel () {
+		sodium.crypto_scalarmult(this.keypair.publicKey, this.keypair.privateKey);
 	}
 
 	registerRealtime () {
 		this.io = io();
 
 		this.io.on('hi', (msg) => {
-
+			if (!this.terminal) {
+				this.initTerminal();
+			}
 		});
 
 		this.io.on('prefix', (prefix) => {
@@ -260,21 +278,42 @@ class apx extends events {
 		let user = localStorage.id;
 
 		this.io.emit('login', {
+			user: user,
 			nonce: this.nonce,
 			publicKey: this.publicKey,
 			authedHandshake: this.authedHandshake
 		});
 	}
 
+	bufcmp (buf1, buf2) {
+		if (buf1.length !== buf2.length) return false;
+
+		for(let i = 0; i < buf2.length; ++i)
+			if (buf1[i] !== buf2[i]) return false;
+
+		return true;
+	}
+
 	initTerminal () {
 		this.terminal = new Terminal();
 
+		if (this.bufcmp(this.secret, sodium.crypto_generichash(32, '', this.nonce))) {
+			this.terminal.write('Bad secret');
+		}
+
 		this.terminal.on('command', (msg) => {
+			let _msg = msg.trim().split(' ');
+
 			if (this.authenticated) {
-				//
 			} else {
-				this.terminal.write('Not authenticated.');
-				this.terminal.commit();
+				if (_msg.length !== 2 || _msg[0] !== 'login') {
+					this.terminal.write('Not authenticated.');
+					this.terminal.commit();
+				} else {
+					localStorage.id = _msg[1];
+
+					this.handshake();
+				}
 			}
 		});
 	}

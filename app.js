@@ -22,7 +22,11 @@ app.io.use(function*(next) {
 
 // router for socket event
 app.io.route('login', function*(msg) {
-	if (this.data.length)
+	console.log(this.data);
+
+	if (this.data.length) {
+
+	}
 
 	this.emit('hi', 'sup');
 });
