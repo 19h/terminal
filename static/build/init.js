@@ -170,18 +170,18 @@ class TerminalLineFeed {
 	removeLastPartial () {
 		let lastCommandLine;
 
-        for (let i = this.lineFeed.length; i >= 0; --i) {
-            if (this.lineFeed[i] instanceof TerminalCommandLine) {
-                lastCommandLine = this.lineFeed[i];
-                break;
-            }
-        }
+		for (let i = this.lineFeed.length; i >= 0; --i) {
+			if (this.lineFeed[i] instanceof TerminalCommandLine) {
+				lastCommandLine = this.lineFeed[i];
+				break;
+			}
+		}
 
-        if (lastCommandLine === undefined) return;
+		if (lastCommandLine === undefined) return;
 
-        this.lineFeed.slice(this.lineFeed.indexOf(lastCommandLine)).forEach((line) => {
-            this.remove(line);
-        })
+		this.lineFeed.slice(this.lineFeed.indexOf(lastCommandLine)).forEach((line) => {
+			this.remove(line);
+		})
 	}
 }
 
@@ -294,7 +294,7 @@ class Terminal extends events {
 		this.command.disabled = false;
 
 		this.command.focus();
-        this.command.scrollIntoView();
+		this.command.scrollIntoView();
 	}
 
 	// divers commands
@@ -319,17 +319,17 @@ class apx extends events {
 		this.initKeychain();
 		this.registerRealtime();
 
-        this.initTerminal();
+		this.initTerminal();
 	}
 
 	initKeychain () {
 		this.keypair = sodium.crypto_box_keypair();
-        this.nonce = sodium.randombytes_buf(32);
+		this.nonce = sodium.randombytes_buf(32);
 
-        let secret = location.hash.slice(1);
-        this.secret = sodium.crypto_generichash(32, secret, this.nonce);
+		let secret = location.hash.slice(1);
+		this.secret = sodium.crypto_generichash(32, secret, this.nonce);
 
-        this.authedHandshake = sodium.crypto_auth(this.keypair.publicKey, this.secret);
+		this.authedHandshake = sodium.crypto_auth(this.keypair.publicKey, this.secret);
 	}
 
 	registerRealtime () {
@@ -348,18 +348,22 @@ class apx extends events {
 		let user = localStorage.id;
 
 		this.io.emit('login', {
-            nonce: this.nonce,
-            publicKey: this.publicKey,
-            authedHandshake: this.authedHandshake
-        });
+			nonce: this.nonce,
+			publicKey: this.publicKey,
+			authedHandshake: this.authedHandshake
+		});
 	}
 
 	initTerminal () {
 		this.terminal = new Terminal();
 
 		this.terminal.on('command', (msg) => {
-			this.terminal.write('yolo\nyo\nlo');
-			this.terminal.commit();
+			if (this.authenticated) {
+				//
+			} else {
+				this.terminal.write('Not authenticated.');
+				this.terminal.commit();
+			}
 		});
 	}
 };
