@@ -206,6 +206,7 @@ class Terminal extends events {
 		this.command.disabled = false;
 
 		this.command.focus();
+        this.command.scrollIntoView();
 	}
 
 	// divers commands
@@ -229,31 +230,40 @@ class apx extends events {
 
 		this.initKeychain();
 		this.registerRealtime();
+
+        this.initTerminal();
 	}
 
 	initKeychain () {
 		this.keypair = sodium.crypto_box_keypair();
+        this.nonce = sodium.randombytes_buf(32);
 
+        let secret = location.hash.slice(1);
+        this.secret = sodium.crypto_generichash(32, secret, this.nonce);
+
+        this.authedHandshake = sodium.crypto_auth(this.keypair.publicKey, this.secret);
 	}
 
 	registerRealtime () {
 		this.io = io();
 
 		this.io.on('hi', (msg) => {
-			this.initTerminal();
+
 		});
 
 		this.io.on('prefix', (prefix) => {
 
 		})
-
-		this.handshake();
 	}
 
 	handshake () {
 		let user = localStorage.id;
 
-		this.io.emit('login', user || '');
+		this.io.emit('login', {
+            nonce: this.nonce,
+            publicKey: this.publicKey,
+            authedHandshake: this.authedHandshake
+        });
 	}
 
 	initTerminal () {
