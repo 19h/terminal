@@ -1,7 +1,9 @@
 'use strict';
 
 let events = require('./events.js');
+
 let msgpack = require('./msgpack.min.js');
+let sha256 = require('./sha256.js');
 
 class TerminalLine {
 	constructor (message) {
@@ -231,6 +233,17 @@ class Terminal extends events {
 	disableTerminal () {
 		this.command.disabled = true;
 	}
+
+	destroy () {
+		// clear eventing
+		this.off();
+
+		// clear line references
+		this.clearTerminal();
+
+		// remove DOM elements
+		document.body.removeChild(this.container);
+	}
 };
 
 class apx extends events {
@@ -246,61 +259,123 @@ class apx extends events {
 				for (; i < l; i++) c = (((((c >>> 1) + ((c & 1) << 15)) | 0) + (arr[i] & 0xff)) & 0xffff) | 0;
 
 				return c;
+			},
+			arr2uint8: (arr) => {
+				let i = 0, u8 = new Uint8Array(arr.length);
+
+				for(; i < arr.length; ++i) {
+					u8[i] = arr[i];
+				}
+
+				return u8;
 			}
 		};
 
-		this.initKeychain();
 		this.registerRealtime();
+
+		this.setupTTY();
+
+		this.reactiveKeychain();
+	}
+
+	setupTTY () {
+		this.initTerminal();
+		this.initKeychain();
 
 		if (localStorage.id) {
 			this.handshake();
-		} else {
-			this.initTerminal();
 		}
 	}
 
-	initKeychain () {
-		this.keypair = sodium.crypto_box_keypair();
-		this.nonce = sodium.randombytes_buf(32);
-
-		let secret = String(location.hash.slice(1));
-		this.secret = sodium.crypto_generichash(32, secret, this.nonce);
-
-		// overwrite secret
-		for(let i = 0; i < 30; ++i)
-			secret = String.fromCharCode.apply(String, sodium.randombytes_buf(64));
-
-		this.authedHandshake = sodium.crypto_auth(this.keypair.publicKey, this.secret);
+	reset () {
 	}
 
-	initSecureChannel () {
-		sodium.crypto_scalarmult(this.keypair.publicKey, this.keypair.privateKey);
+	initKeychain () {
+		this.privateKeyChain = {};
+
+		this.privateKeyChain.keypair = sodium.crypto_box_keypair();
+		this.privateKeyChain.nonce = sodium.randombytes_buf(24);
+
+		let secret = String(location.hash.slice(1));
+
+		if (secret === '') {
+			this.terminal.writeRaw('Bad secret');
+			this.terminal.disableTerminal();
+
+			throw new Error();
+		}
+
+		secret = sha256(secret)
+
+		this.privateKeyChain.authedHandshake = sodium.crypto_auth(this.privateKeyChain.nonce, secret);
+	}
+
+	reactiveKeychain () {
+		window.addEventListener('hashchange', () => {
+			this.terminal.destroy();
+			this.terminal = null;
+
+			setTimeout(() => {
+				this.setupTTY();
+			});
+		})
 	}
 
 	registerRealtime () {
 		this.io = io();
 
-		this.io.on('hi', (msg) => {
-			if (!this.terminal) {
-				this.initTerminal();
-			}
+		this.io.on('err', (msg) => {
+			this.terminal.write(msg);
+			this.terminal.commit();
 		});
 
 		this.io.on('prefix', (prefix) => {
 
-		})
+		});
+
+		this.io.on('rpc', (data) => this.handleRPC(data));
+	}
+
+	handleRPC (data) {
+		try {
+			data = msgpack.unpack(new Uint8Array(data));
+
+			switch (data.type) {
+				case 'handshake':
+					return this.digestHandshake(data.publicKey, data.nonce);
+			}
+		} catch(e) {
+			console.warn('Received invalid RPC frame.', e.stack);
+		}
+	}
+
+	digestHandshake (publicKey, nonce) {
+		this.keyChain = {
+			publicKey: this.helpers.arr2uint8(publicKey),
+			nonce: this.helpers.arr2uint8(nonce)
+		};
+
+
+		sodium.crypto_box_easy(
+			"test",
+			this.keyChain.nonce,
+			this.keyChain.publicKey,
+			this.privateKeyChain.keypair.privateKey
+		);
+
+
 	}
 
 	handshake () {
 		let user = localStorage.id;
 
-		let arr = (item) => String.fromCharCode.apply(null, item);
+		let arr = (item) => Array.prototype.slice.call(item);
 
 		let seed = {
 			user: user,
-			nonce: this.nonce,
-			publicKey: this.keypair.publicKey,
-			authedHandshake: this.authedHandshake
+			nonce: arr(this.privateKeyChain.nonce),
+			publicKey: arr(this.privateKeyChain.keypair.publicKey),
+			authedHandshake: arr(this.privateKeyChain.authedHandshake)
 		};
 
 		let packet = String.fromCharCode.apply(null, msgpack.pack(seed)),
@@ -320,10 +395,6 @@ class apx extends events {
 
 	initTerminal () {
 		this.terminal = new Terminal();
-
-		if (this.bufcmp(this.secret, sodium.crypto_generichash(32, '', this.nonce))) {
-			this.terminal.write('Bad secret');
-		}
 
 		this.terminal.on('command', (msg) => {
 			let _msg = msg.trim().split(' ');

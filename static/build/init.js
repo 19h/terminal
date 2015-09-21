@@ -93,7 +93,9 @@
 'use strict';
 
 let events = require('./events.js');
+
 let msgpack = require('./msgpack.min.js');
+let sha256 = require('./sha256.js');
 
 class TerminalLine {
 	constructor (message) {
@@ -323,6 +325,17 @@ class Terminal extends events {
 	disableTerminal () {
 		this.command.disabled = true;
 	}
+
+	destroy () {
+		// clear eventing
+		this.off();
+
+		// clear line references
+		this.clearTerminal();
+
+		// remove DOM elements
+		document.body.removeChild(this.container);
+	}
 };
 
 class apx extends events {
@@ -338,61 +351,123 @@ class apx extends events {
 				for (; i < l; i++) c = (((((c >>> 1) + ((c & 1) << 15)) | 0) + (arr[i] & 0xff)) & 0xffff) | 0;
 
 				return c;
+			},
+			arr2uint8: (arr) => {
+				let i = 0, u8 = new Uint8Array(arr.length);
+
+				for(; i < arr.length; ++i) {
+					u8[i] = arr[i];
+				}
+
+				return u8;
 			}
 		};
 
-		this.initKeychain();
 		this.registerRealtime();
+
+		this.setupTTY();
+
+		this.reactiveKeychain();
+	}
+
+	setupTTY () {
+		this.initTerminal();
+		this.initKeychain();
 
 		if (localStorage.id) {
 			this.handshake();
-		} else {
-			this.initTerminal();
 		}
 	}
 
-	initKeychain () {
-		this.keypair = sodium.crypto_box_keypair();
-		this.nonce = sodium.randombytes_buf(32);
-
-		let secret = String(location.hash.slice(1));
-		this.secret = sodium.crypto_generichash(32, secret, this.nonce);
-
-		// overwrite secret
-		for(let i = 0; i < 30; ++i)
-			secret = String.fromCharCode.apply(String, sodium.randombytes_buf(64));
-
-		this.authedHandshake = sodium.crypto_auth(this.keypair.publicKey, this.secret);
+	reset () {
 	}
 
-	initSecureChannel () {
-		sodium.crypto_scalarmult(this.keypair.publicKey, this.keypair.privateKey);
+	initKeychain () {
+		this.privateKeyChain = {};
+
+		this.privateKeyChain.keypair = sodium.crypto_box_keypair();
+		this.privateKeyChain.nonce = sodium.randombytes_buf(24);
+
+		let secret = String(location.hash.slice(1));
+
+		if (secret === '') {
+			this.terminal.writeRaw('Bad secret');
+			this.terminal.disableTerminal();
+
+			throw new Error();
+		}
+
+		secret = sha256(secret)
+
+		this.privateKeyChain.authedHandshake = sodium.crypto_auth(this.privateKeyChain.nonce, secret);
+	}
+
+	reactiveKeychain () {
+		window.addEventListener('hashchange', () => {
+			this.terminal.destroy();
+			this.terminal = null;
+
+			setTimeout(() => {
+				this.setupTTY();
+			});
+		})
 	}
 
 	registerRealtime () {
 		this.io = io();
 
-		this.io.on('hi', (msg) => {
-			if (!this.terminal) {
-				this.initTerminal();
-			}
+		this.io.on('err', (msg) => {
+			this.terminal.write(msg);
+			this.terminal.commit();
 		});
 
 		this.io.on('prefix', (prefix) => {
 
-		})
+		});
+
+		this.io.on('rpc', (data) => this.handleRPC(data));
+	}
+
+	handleRPC (data) {
+		try {
+			data = msgpack.unpack(new Uint8Array(data));
+
+			switch (data.type) {
+				case 'handshake':
+					return this.digestHandshake(data.publicKey, data.nonce);
+			}
+		} catch(e) {
+			console.warn('Received invalid RPC frame.', e.stack);
+		}
+	}
+
+	digestHandshake (publicKey, nonce) {
+		this.keyChain = {
+			publicKey: this.helpers.arr2uint8(publicKey),
+			nonce: this.helpers.arr2uint8(nonce)
+		};
+
+
+		sodium.crypto_box_easy(
+			"test",
+			this.keyChain.nonce,
+			this.keyChain.publicKey,
+			this.privateKeyChain.keypair.privateKey
+		);
+
+
 	}
 
 	handshake () {
 		let user = localStorage.id;
 
-		let arr = (item) => String.fromCharCode.apply(null, item);
+		let arr = (item) => Array.prototype.slice.call(item);
 
 		let seed = {
 			user: user,
-			nonce: this.nonce,
-			publicKey: this.keypair.publicKey,
-			authedHandshake: this.authedHandshake
+			nonce: arr(this.privateKeyChain.nonce),
+			publicKey: arr(this.privateKeyChain.keypair.publicKey),
+			authedHandshake: arr(this.privateKeyChain.authedHandshake)
 		};
 
 		let packet = String.fromCharCode.apply(null, msgpack.pack(seed)),
@@ -412,10 +487,6 @@ class apx extends events {
 
 	initTerminal () {
 		this.terminal = new Terminal();
-
-		if (this.bufcmp(this.secret, sodium.crypto_generichash(32, '', this.nonce))) {
-			this.terminal.write('Bad secret');
-		}
 
 		this.terminal.on('command', (msg) => {
 			let _msg = msg.trim().split(' ');
@@ -437,7 +508,7 @@ class apx extends events {
 
 new apx();
 
-}, {"./events.js":2,"./msgpack.min.js":3}],
+}, {"./events.js":2,"./msgpack.min.js":3,"./sha256.js":4}],
 2: [function(require, module, exports) {
 var domain;function EventEmitter(){EventEmitter.init.call(this)}module.exports=EventEmitter;EventEmitter.EventEmitter=EventEmitter;EventEmitter.usingDomains=!1;EventEmitter.prototype.domain=void 0;EventEmitter.prototype._events=void 0;EventEmitter.prototype._maxListeners=void 0;EventEmitter.defaultMaxListeners=10; EventEmitter.init=function(){this.domain=null;EventEmitter.usingDomains&&(domain=domain||require("domain"),!domain.active||this instanceof domain.Domain||(this.domain=domain.active));this._events&&this._events!==Object.getPrototypeOf(this)._events||(this._events={},this._eventsCount=0);this._maxListeners=this._maxListeners||void 0};EventEmitter.prototype.setMaxListeners=function(b){if("number"!==typeof b||0>b||isNaN(b))throw new TypeError("n must be a positive number");this._maxListeners=b;return this}; function $getMaxListeners(b){return void 0===b._maxListeners?EventEmitter.defaultMaxListeners:b._maxListeners}EventEmitter.prototype.getMaxListeners=function(){return $getMaxListeners(this)};function emitNone(b,a,c){if(a)b.call(c);else{a=b.length;b=arrayClone(b,a);for(var d=0;d<a;++d)b[d].call(c)}}function emitOne(b,a,c,d){if(a)b.call(c,d);else{a=b.length;b=arrayClone(b,a);for(var e=0;e<a;++e)b[e].call(c,d)}} function emitTwo(b,a,c,d,e){if(a)b.call(c,d,e);else{a=b.length;b=arrayClone(b,a);for(var f=0;f<a;++f)b[f].call(c,d,e)}}function emitThree(b,a,c,d,e,f){if(a)b.call(c,d,e,f);else{a=b.length;b=arrayClone(b,a);for(var g=0;g<a;++g)b[g].call(c,d,e,f)}}function emitMany(b,a,c,d){if(a)b.apply(c,d);else{a=b.length;b=arrayClone(b,a);for(var e=0;e<a;++e)b[e].apply(c,d)}} EventEmitter.prototype.emit=function(b){var a,c,d,e,f,g;a=!1;d="error"===b;if(c=this._events)d=d&&null==c.error;else if(!d)return!1;g=this.domain;if(d){a=arguments[1];if(g)a||(a=Error('Uncaught, unspecified "error" event.')),a.domainEmitter=this,a.domain=g,a.domainThrown=!1,g.emit("error",a);else{if(a instanceof Error)throw a;g=Error('Uncaught, unspecified "error" event. ('+a+")");g.context=a;throw g;}return!1}c=c[b];if(!c)return!1;g&&(g.enter(),a=!0);var h="function"===typeof c;d=arguments.length; switch(d){case 1:emitNone(c,h,this);break;case 2:emitOne(c,h,this,arguments[1]);break;case 3:emitTwo(c,h,this,arguments[1],arguments[2]);break;case 4:emitThree(c,h,this,arguments[1],arguments[2],arguments[3]);break;default:e=Array(d-1);for(f=1;f<d;f++)e[f-1]=arguments[f];emitMany(c,h,this,e)}a&&g.exit();return!0}; EventEmitter.prototype.addListener=function(b,a){var c,d;if("function"!==typeof a)throw new TypeError("listener must be a function");(c=this._events)?(c.newListener&&(this.emit("newListener",b,a.listener?a.listener:a),c=this._events),d=c[b]):(c=this._events={},this._eventsCount=0);d?("function"===typeof d?d=c[b]=[d,a]:d.push(a),d.warned||(c=$getMaxListeners(this))&&0<c&&d.length>c&&(d.warned=!0,console.error("(node) warning: possible EventEmitter memory leak detected. %d %s listeners added. Use emitter.setMaxListeners() to increase limit.", d.length,b),console.trace())):(c[b]=a,++this._eventsCount);return this};EventEmitter.prototype.on=EventEmitter.prototype.addListener;EventEmitter.prototype.once=function(b,a){function c(){this.removeListener(b,c);d||(d=!0,a.apply(this,arguments))}if("function"!==typeof a)throw new TypeError("listener must be a function");var d=!1;c.listener=a;this.on(b,c);return this}; EventEmitter.prototype.removeListener=function(b,a){var c,d,e,f;if("function"!==typeof a)throw new TypeError("listener must be a function");d=this._events;if(!d)return this;c=d[b];if(!c)return this;if(c===a||c.listener&&c.listener===a)0===--this._eventsCount?this._events={}:(delete d[b],d.removeListener&&this.emit("removeListener",b,a));else if("function"!==typeof c){e=-1;for(f=c.length;0<f--;)if(c[f]===a||c[f].listener&&c[f].listener===a){e=f;break}if(0>e)return this;if(1===c.length){c[0]=void 0; if(0===--this._eventsCount)return this._events={},this;delete d[b]}else spliceOne(c,e);d.removeListener&&this.emit("removeListener",b,a)}return this}; EventEmitter.prototype.removeAllListeners=function(b){var a;a=this._events;if(!a)return this;if(!a.removeListener)return 0===arguments.length?(this._events={},this._eventsCount=0):a[b]&&(0===--this._eventsCount?this._events={}:delete a[b]),this;if(0===arguments.length){a=Object.keys(a);for(var c=0,d;c<a.length;++c)d=a[c],"removeListener"!==d&&this.removeAllListeners(d);this.removeAllListeners("removeListener");this._events={};this._eventsCount=0;return this}a=a[b];if("function"===typeof a)this.removeListener(b, a);else if(a){do this.removeListener(b,a[a.length-1]);while(a[0])}return this};EventEmitter.prototype.listeners=function(b){var a=this._events;b=a?(b=a[b])?"function"===typeof b?[b]:arrayClone(b,b.length):[]:[];return b};EventEmitter.listenerCount=function(b,a){return"function"===typeof b.listenerCount?b.listenerCount(a):listenerCount.call(b,a)};EventEmitter.prototype.listenerCount=listenerCount; function listenerCount(b){var a=this._events;if(a){b=a[b];if("function"===typeof b)return 1;if(b)return b.length}return 0}function spliceOne(b,a){for(var c=a,d=c+1,e=b.length;d<e;c+=1,d+=1)b[c]=b[d];b.pop()}function arrayClone(b,a){for(var c=Array(a);a--;)c[a]=b[a];return c}
 }, {}],
@@ -455,5 +526,221 @@ for(m in l)g.setRequestHeader(m,l[m]);"undefined"!==typeof addEventListener&&add
 e;)a.push(c[b[++d]]);return btoa(a.join(""))}for(--e;d<e;)c=b[++d]<<16|b[++d]<<8|b[++d],a.push(k[c>>18&63],k[c>>12&63],k[c>>6&63],k[c&63]);1<f&&(a[a.length-2]="=");0<f&&(a[a.length-1]="=");return a.join("")}/MSIE/.test(navigator.userAgent);var r={},m={},x={},A="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".split(""),l={8:128,16:32768,32:2147483648},z=/.{8}/g;self.importScripts&&(onmessage=function(b){"pack"===b.data.method?postMessage(v(n(b.data.data))):postMessage(u(b.data.data))});
 (function(){for(var b=0,a;256>b;++b)a=String.fromCharCode(b),r[("0000000"+b.toString(2)).slice(-8)]=b,m[a]=b,x[b]=a;for(b=128;256>b;++b)m[String.fromCharCode(63232+b)]=b})();module.exports={pack:n,unpack:u,worker:"msgpack.js",upload:function(b,a,c){a.method="PUT";a.binary=!0;if(a.worker&&"undefined"!==typeof Worker){var d=new Worker(msgpack.worker);d.onmessage=function(d){a.data=d.data;q(b,a,c)};d.postMessage({method:"pack",data:a.data})}else a.data=v(n(a.data)),q(b,a,c)},download:function(b,a,c){a.method=
 "GET";a.binary=!0;q(b,a,c)}}})();
+
+}, {}],
+4: [function(require, module, exports) {
+'use strict';
+
+var EXTRA = [-2147483648, 8388608, 32768, 128];
+var SHIFT = [24, 16, 8, 0];
+
+var K = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+];
+
+var blocks = [];
+
+module.exports = function(message) {
+    let notString = typeof(message) !== 'string';
+
+    if (notString && message.constructor == ArrayBuffer) {
+        message = new Uint8Array(message);
+    }
+
+    var h0, h1, h2, h3, h4, h5, h6, h7, block, code, first = true,
+        end = false,
+        i, j, index = 0,
+        start = 0,
+        bytes = 0,
+        length = message.length,
+        s0, s1, maj, t1, t2, ch, ab, da, cd, bc;
+
+    h0 = 0x6a09e667;
+    h1 = 0xbb67ae85;
+    h2 = 0x3c6ef372;
+    h3 = 0xa54ff53a;
+    h4 = 0x510e527f;
+    h5 = 0x9b05688c;
+    h6 = 0x1f83d9ab;
+    h7 = 0x5be0cd19;
+
+    block = 0;
+    do {
+        blocks[0] = block;
+        blocks[16] = blocks[1] = blocks[2] = blocks[3] =
+            blocks[4] = blocks[5] = blocks[6] = blocks[7] =
+            blocks[8] = blocks[9] = blocks[10] = blocks[11] =
+            blocks[12] = blocks[13] = blocks[14] = blocks[15] = 0;
+        if (notString) {
+            for (i = start; index < length && i < 64; ++index) {
+                blocks[i >> 2] |= message[index] << SHIFT[i++ & 3];
+            }
+        } else {
+            for (i = start; index < length && i < 64; ++index) {
+                code = message.charCodeAt(index);
+                if (code < 0x80) {
+                    blocks[i >> 2] |= code << SHIFT[i++ & 3];
+                } else if (code < 0x800) {
+                    blocks[i >> 2] |= (0xc0 | (code >> 6)) << SHIFT[i++ & 3];
+                    blocks[i >> 2] |= (0x80 | (code & 0x3f)) << SHIFT[i++ & 3];
+                } else if (code < 0xd800 || code >= 0xe000) {
+                    blocks[i >> 2] |= (0xe0 | (code >> 12)) << SHIFT[i++ & 3];
+                    blocks[i >> 2] |= (0x80 | ((code >> 6) & 0x3f)) << SHIFT[i++ & 3];
+                    blocks[i >> 2] |= (0x80 | (code & 0x3f)) << SHIFT[i++ & 3];
+                } else {
+                    code = 0x10000 + (((code & 0x3ff) << 10) | (message.charCodeAt(++index) & 0x3ff));
+                    blocks[i >> 2] |= (0xf0 | (code >> 18)) << SHIFT[i++ & 3];
+                    blocks[i >> 2] |= (0x80 | ((code >> 12) & 0x3f)) << SHIFT[i++ & 3];
+                    blocks[i >> 2] |= (0x80 | ((code >> 6) & 0x3f)) << SHIFT[i++ & 3];
+                    blocks[i >> 2] |= (0x80 | (code & 0x3f)) << SHIFT[i++ & 3];
+                }
+            }
+        }
+        bytes += i - start;
+        start = i - 64;
+        if (index == length) {
+            blocks[i >> 2] |= EXTRA[i & 3];
+            ++index;
+        }
+        block = blocks[16];
+        if (index > length && i < 56) {
+            blocks[15] = bytes << 3;
+            end = true;
+        }
+
+        var a = h0,
+            b = h1,
+            c = h2,
+            d = h3,
+            e = h4,
+            f = h5,
+            g = h6,
+            h = h7;
+        for (j = 16; j < 64; ++j) {
+            // rightrotate
+            t1 = blocks[j - 15];
+            s0 = ((t1 >>> 7) | (t1 << 25)) ^ ((t1 >>> 18) | (t1 << 14)) ^ (t1 >>> 3);
+            t1 = blocks[j - 2];
+            s1 = ((t1 >>> 17) | (t1 << 15)) ^ ((t1 >>> 19) | (t1 << 13)) ^ (t1 >>> 10);
+            blocks[j] = blocks[j - 16] + s0 + blocks[j - 7] + s1 << 0;
+        }
+
+        bc = b & c;
+        for (j = 0; j < 64; j += 4) {
+            if (first) {
+                ab = 704751109;
+                t1 = blocks[0] - 210244248;
+                h = t1 - 1521486534 << 0;
+                d = t1 + 143694565 << 0;
+                first = false;
+            } else {
+                s0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
+                s1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
+                ab = a & b;
+                maj = ab ^ (a & c) ^ bc;
+                ch = (e & f) ^ (~e & g);
+                t1 = h + s1 + ch + K[j] + blocks[j];
+                t2 = s0 + maj;
+                h = d + t1 << 0;
+                d = t1 + t2 << 0;
+            }
+            s0 = ((d >>> 2) | (d << 30)) ^ ((d >>> 13) | (d << 19)) ^ ((d >>> 22) | (d << 10));
+            s1 = ((h >>> 6) | (h << 26)) ^ ((h >>> 11) | (h << 21)) ^ ((h >>> 25) | (h << 7));
+            da = d & a;
+            maj = da ^ (d & b) ^ ab;
+            ch = (h & e) ^ (~h & f);
+            t1 = g + s1 + ch + K[j + 1] + blocks[j + 1];
+            t2 = s0 + maj;
+            g = c + t1 << 0;
+            c = t1 + t2 << 0;
+            s0 = ((c >>> 2) | (c << 30)) ^ ((c >>> 13) | (c << 19)) ^ ((c >>> 22) | (c << 10));
+            s1 = ((g >>> 6) | (g << 26)) ^ ((g >>> 11) | (g << 21)) ^ ((g >>> 25) | (g << 7));
+            cd = c & d;
+            maj = cd ^ (c & a) ^ da;
+            ch = (g & h) ^ (~g & e);
+            t1 = f + s1 + ch + K[j + 2] + blocks[j + 2];
+            t2 = s0 + maj;
+            f = b + t1 << 0;
+            b = t1 + t2 << 0;
+            s0 = ((b >>> 2) | (b << 30)) ^ ((b >>> 13) | (b << 19)) ^ ((b >>> 22) | (b << 10));
+            s1 = ((f >>> 6) | (f << 26)) ^ ((f >>> 11) | (f << 21)) ^ ((f >>> 25) | (f << 7));
+            bc = b & c;
+            maj = bc ^ (b & d) ^ cd;
+            ch = (f & g) ^ (~f & h);
+            t1 = e + s1 + ch + K[j + 3] + blocks[j + 3];
+            t2 = s0 + maj;
+            e = a + t1 << 0;
+            a = t1 + t2 << 0;
+        }
+
+        h0 = h0 + a << 0;
+        h1 = h1 + b << 0;
+        h2 = h2 + c << 0;
+        h3 = h3 + d << 0;
+        h4 = h4 + e << 0;
+        h5 = h5 + f << 0;
+        h6 = h6 + g << 0;
+        h7 = h7 + h << 0;
+    } while (!end);
+
+    let hash = new Uint8Array(32);
+
+    // block 1
+    hash[0]  = (h0 >> 24) & 0xFF,
+    hash[1]  = (h0 >> 16) & 0xFF,
+    hash[2]  = (h0 >> 8) & 0xFF,
+    hash[3]  = (h0) & 0xFF;
+
+    // block 2
+    hash[4]  = (h1 >> 24) & 0xFF,
+    hash[5]  = (h1 >> 16) & 0xFF,
+    hash[6]  = (h1 >> 8) & 0xFF,
+    hash[7]  = (h1) & 0xFF;
+
+    // block 3
+    hash[8]  = (h2 >> 24) & 0xFF,
+    hash[9]  = (h2 >> 16) & 0xFF,
+    hash[10] = (h2 >> 8) & 0xFF,
+    hash[11] = (h2) & 0xFF;
+
+    // block 4
+    hash[12] = (h3 >> 24) & 0xFF,
+    hash[13] = (h3 >> 16) & 0xFF,
+    hash[14] = (h3 >> 8) & 0xFF,
+    hash[15] = (h3) & 0xFF;
+
+    // block 5
+    hash[16] = (h4 >> 24) & 0xFF,
+    hash[17] = (h4 >> 16) & 0xFF,
+    hash[18] = (h4 >> 8) & 0xFF,
+    hash[19] = (h4) & 0xFF;
+
+    // block 6
+    hash[20] = (h5 >> 24) & 0xFF,
+    hash[21] = (h5 >> 16) & 0xFF,
+    hash[22] = (h5 >> 8) & 0xFF,
+    hash[23] = (h5) & 0xFF;
+
+    // block 7
+    hash[24] = (h6 >> 24) & 0xFF,
+    hash[25] = (h6 >> 16) & 0xFF,
+    hash[26] = (h6 >> 8) & 0xFF,
+    hash[27] = (h6) & 0xFF;
+
+    // block 8
+    hash[28] = (h7 >> 24) & 0xFF,
+    hash[29] = (h7 >> 16) & 0xFF,
+    hash[30] = (h7 >> 8) & 0xFF,
+    hash[31] = (h7) & 0xFF;
+
+    return hash;
+};
 
 }, {}]}, {}, {"1":""})

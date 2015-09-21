@@ -8,4 +8,12 @@ module.exports = class Helpers {
 
 		return c;
 	}
+
+	isArray (item, n) {
+		if (item instanceof Array && item.length === n) {
+			return true;
+		}
+
+		return false;
+	}
 }
