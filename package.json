@@ -9,6 +9,9 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "koa-conditional-get": "^1.0.3",
+    "koa-etag": "^2.0.0",
+    "koa-gzip": "^0.1.0",
     "koa-static": "^1.4.9",
     "koa.io": "0.0.3",
     "yub": "^0.10.10"

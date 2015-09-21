@@ -1,6 +1,7 @@
 'use strict';
 
-let events = require("./events.js");
+let events = require('./events.js');
+let msgpack = require('./msgpack.min.js');
 
 class TerminalLine {
 	constructor (message) {
@@ -23,7 +24,7 @@ class TerminalCommandLine {
 		this.element = document.createElement('inputline');
 		this.prompt = document.createElement('prompt');
 		this.input = document.createElement('input');
-		
+
 		this.input.className = 'command';
 
 		this.element.appendChild(this.prompt);
@@ -182,11 +183,6 @@ class Terminal extends events {
 
 	// write partial message, non-exit
 	write (msg) {
-		msg = msg.split('\n').map((line) => line.trim());
-		msg = msg.map((line) => {
-			return new TerminalLine(line);
-		});
-
 		let fakeInputLine = new TerminalCommandLine();
 
 		fakeInputLine.setDisabled(true);
@@ -194,6 +190,15 @@ class Terminal extends events {
 		fakeInputLine.setPrompt(this._getPromptPrefix());
 
 		this.lineFeed.push(fakeInputLine);
+
+		this.writeRaw(msg);
+	}
+
+	writeRaw (msg) {
+		msg = msg.split('\n').map((line) => line.trim());
+		msg = msg.map((line) => {
+			return new TerminalLine(line);
+		});
 
 		msg.forEach((line) => {
 			this.lineFeed.push(line);
@@ -231,6 +236,18 @@ class Terminal extends events {
 class apx extends events {
 	constructor () {
 		super();
+
+		this.helpers = {
+			bsd16: (arr) => {
+				let c = 0,
+					i = 0,
+					l = arr.length;
+
+				for (; i < l; i++) c = (((((c >>> 1) + ((c & 1) << 15)) | 0) + (arr[i] & 0xff)) & 0xffff) | 0;
+
+				return c;
+			}
+		};
 
 		this.initKeychain();
 		this.registerRealtime();
@@ -277,12 +294,19 @@ class apx extends events {
 	handshake () {
 		let user = localStorage.id;
 
-		this.io.emit('login', {
+		let arr = (item) => String.fromCharCode.apply(null, item);
+
+		let seed = {
 			user: user,
 			nonce: this.nonce,
-			publicKey: this.publicKey,
+			publicKey: this.keypair.publicKey,
 			authedHandshake: this.authedHandshake
-		});
+		};
+
+		let packet = String.fromCharCode.apply(null, msgpack.pack(seed)),
+		  checksum = this.helpers.bsd16(packet);
+
+		this.io.emit('handshake', packet, checksum);
 	}
 
 	bufcmp (buf1, buf2) {

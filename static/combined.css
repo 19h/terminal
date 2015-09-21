@@ -6,7 +6,7 @@
 }
 
 ::selection { background: rgb(0, 128, 255); }
-html, body { margin: .2em; height: 100%; }
+html, body { margin: .2em; }
 body { font-family: AndaleMono, monospace; color: white; background-color: black; }
 
 cream {
