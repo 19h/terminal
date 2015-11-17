@@ -2,7 +2,7 @@
 
 let events = require('./events.js');
 
-let msgpack = require('./msgpack.min.js');
+let msgpack = require('./msgpack.js');
 let sha256 = require('./sha256.js');
 
 class TerminalLine {
@@ -79,7 +79,7 @@ class TerminalLineFeed {
 	}
 
 	removeAllLines () {
-		this.lineFeed.forEach((line) => this.remove(line));
+		this.lineFeed.forEach(line => this.remove(line));
 	}
 
 	removeLastPartial () {
@@ -94,11 +94,11 @@ class TerminalLineFeed {
 
 		if (lastCommandLine === undefined) return;
 
-		this.lineFeed.slice(this.lineFeed.indexOf(lastCommandLine)).forEach((line) => {
+		this.lineFeed.slice(this.lineFeed.indexOf(lastCommandLine)).forEach(line => {
 			this.remove(line);
 		})
 	}
-}
+};
 
 class Terminal extends events {
 	constructor () {
@@ -125,14 +125,14 @@ class Terminal extends events {
 		this.commandFeed = [];
 	}
 
-	_inputLine (readOnly) {
+	_inputLine () {
 		return new TerminalCommandLine ();
 	}
 
 	_getPromptPrefix () {
-		return this.prefixMeta.name
-			   + '@' + this.prefixMeta.instance
-			   + ':' + this.prefixMeta.uri + '$';
+		return this.prefixMeta.name +
+		       '@' + this.prefixMeta.instance +
+		       ':' + this.prefixMeta.uri + '$';
 	}
 	_commitPromptPrefix () {
 		let promptPrefix = this._getPromptPrefix();
@@ -160,7 +160,7 @@ class Terminal extends events {
 	}
 
 	registerEvents() {
-		this.command.addEventListener('keydown', (e) => {
+		this.command.addEventListener('keydown', e => {
 			if (e.metaKey) {
 				e.preventDefault();
 
@@ -197,18 +197,14 @@ class Terminal extends events {
 	}
 
 	writeRaw (msg) {
-		msg = msg.split('\n').map((line) => line.trim());
-		msg = msg.map((line) => {
-			return new TerminalLine(line);
-		});
+		msg = msg.split('\n').map(line => line.trim());
+		msg = msg.map(line => new TerminalLine(line));
 
-		msg.forEach((line) => {
-			this.lineFeed.push(line);
-		});
+		msg.forEach(line => this.lineFeed.push(line));
 	}
 
 	// quit command
-	commit (msg) {
+	commit () {
 		this.command.value = '';
 		this.command.disabled = false;
 
@@ -244,14 +240,14 @@ class Terminal extends events {
 		// remove DOM elements
 		document.body.removeChild(this.container);
 	}
-};
+}
 
 class apx extends events {
 	constructor () {
 		super();
 
 		this.helpers = {
-			bsd16: (arr) => {
+			bsd16: arr => {
 				let c = 0,
 					i = 0,
 					l = arr.length;
@@ -260,7 +256,7 @@ class apx extends events {
 
 				return c;
 			},
-			arr2uint8: (arr) => {
+			arr2uint8: arr => {
 				let i = 0, u8 = new Uint8Array(arr.length);
 
 				for(; i < arr.length; ++i) {
@@ -291,10 +287,10 @@ class apx extends events {
 	}
 
 	initKeychain () {
-		this.privateKeyChain = {};
+		this.alice = {};
 
-		this.privateKeyChain.keypair = sodium.crypto_box_keypair();
-		this.privateKeyChain.nonce = sodium.randombytes_buf(24);
+		this.alice.keypair = sodium.crypto_box_keypair();
+		this.alice.nonce = sodium.randombytes_buf(sodium.crypto_box_NONCEBYTES);
 
 		let secret = String(location.hash.slice(1));
 
@@ -305,9 +301,11 @@ class apx extends events {
 			throw new Error();
 		}
 
-		secret = sha256(secret)
+		secret = sha256(secret);
 
-		this.privateKeyChain.authedHandshake = sodium.crypto_auth(this.privateKeyChain.nonce, secret);
+		this.alice.secretHash = secret;
+
+		this.alice.authedHandshake = sodium.crypto_auth(this.alice.nonce, secret);
 	}
 
 	reactiveKeychain () {
@@ -315,30 +313,38 @@ class apx extends events {
 			this.terminal.destroy();
 			this.terminal = null;
 
-			setTimeout(() => {
-				this.setupTTY();
-			});
-		})
+			setTimeout(() => this.setupTTY());
+		});
 	}
 
 	registerRealtime () {
-		this.io = io();
+		this.io = io({
+			path: '/io'
+		});
 
-		this.io.on('err', (msg) => {
+		let writeAndFlush = msg => {
 			this.terminal.write(msg);
 			this.terminal.commit();
+		};
+
+		this.io.on('err', writeAndFlush);
+		this.io.on('info', writeAndFlush);
+
+		this.io.on('post-auth', (user, postAuth) => {
+			if (sodium.crypto_auth_verify(Uint8Array.from(postAuth), this.bob.nonce, this.alice.secretHash)) {
+				this.authenticated = true;
+
+				this.terminal.write(`Welcome, ${user}.`);
+				this.terminal.commit();
+			}
 		});
 
-		this.io.on('prefix', (prefix) => {
-
-		});
-
-		this.io.on('rpc', (data) => this.handleRPC(data));
+		this.io.on('rpc', data => this.handleRPC(data));
 	}
 
 	handleRPC (data) {
 		try {
-			data = msgpack.unpack(new Uint8Array(data));
+			data = msgpack.decode(new Uint8Array(data));
 
 			switch (data.type) {
 				case 'handshake':
@@ -350,35 +356,34 @@ class apx extends events {
 	}
 
 	digestHandshake (publicKey, nonce) {
-		this.keyChain = {
+		this.bob = {
 			publicKey: this.helpers.arr2uint8(publicKey),
 			nonce: this.helpers.arr2uint8(nonce)
 		};
 
-
-		sodium.crypto_box_easy(
-			"test",
-			this.keyChain.nonce,
-			this.keyChain.publicKey,
-			this.privateKeyChain.keypair.privateKey
+		let cipher = sodium.crypto_box_easy(
+			'init',
+			this.alice.nonce,
+			this.bob.publicKey,
+			this.alice.keypair.privateKey
 		);
 
-
+		this.io.emit('post-handshake', [...cipher]);
 	}
 
 	handshake () {
 		let user = localStorage.id;
 
-		let arr = (item) => Array.prototype.slice.call(item);
+		let arr = item => Array.prototype.slice.call(item);
 
 		let seed = {
 			user: user,
-			nonce: arr(this.privateKeyChain.nonce),
-			publicKey: arr(this.privateKeyChain.keypair.publicKey),
-			authedHandshake: arr(this.privateKeyChain.authedHandshake)
+			nonce: [...this.alice.nonce],
+			publicKey: [...this.alice.keypair.publicKey],
+			authedHandshake: [...this.alice.authedHandshake]
 		};
 
-		let packet = String.fromCharCode.apply(null, msgpack.pack(seed)),
+		let packet = String.fromCharCode.apply(null, msgpack.encode(seed)),
 		  checksum = this.helpers.bsd16(packet);
 
 		this.io.emit('handshake', packet, checksum);
@@ -396,10 +401,11 @@ class apx extends events {
 	initTerminal () {
 		this.terminal = new Terminal();
 
-		this.terminal.on('command', (msg) => {
+		this.terminal.on('command', msg => {
 			let _msg = msg.trim().split(' ');
 
 			if (this.authenticated) {
+				this.io.emit('command', _msg);
 			} else {
 				if (_msg.length !== 2 || _msg[0] !== 'login') {
 					this.terminal.write('Not authenticated.');

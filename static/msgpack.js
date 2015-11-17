@@ -1,594 +1,593 @@
-// === msgpack ===
-// MessagePack -> http://msgpack.sourceforge.net/
+"use strict";
 
-;(function() {
-    var _ie = /MSIE/.test(navigator.userAgent),
-        _bit2num = {}, // BitStringToNumber      { "00000000": 0, ... "11111111": 255 }
-        _bin2num = {}, // BinaryStringToNumber   { "\00": 0, ... "\ff": 255 }
-        _num2bin = {}, // NumberToBinaryString   { 0: "\00", ... 255: "\ff" }
-        _num2b64 = ("ABCDEFGHIJKLMNOPQRSTUVWXYZ" +
-            "abcdefghijklmnopqrstuvwxyz0123456789+/").split(""),
-        _sign = {
-            8: 0x80,
-            16: 0x8000,
-            32: 0x80000000
-        },
-        _split8char = /.{8}/g;
+var bops = require('bops');
 
-    // for WebWorkers Code Block
-    self.importScripts && (onmessage = function(event) {
-        if (event.data.method === "pack") {
-            postMessage(base64encode(msgpackpack(event.data.data)));
-        } else {
-            postMessage(msgpackunpack(event.data.data));
-        }
+exports.encode = function(value) {
+    var size = sizeof(value);
+    if (size === 0) return undefined;
+    var buffer = bops.create(size);
+    encode(value, buffer, 0);
+    return buffer;
+};
+
+exports.decode = decode;
+
+// https://gist.github.com/frsyuki/5432559 - v5 spec
+//
+// I've used one extension point from `fixext 1` to store `undefined`. On the wire this
+// should translate to exactly 0xd40000
+//
+// +--------+--------+--------+
+// |  0xd4  |  0x00  |  0x00  |
+// +--------+--------+--------+
+//    ^ fixext |        ^ value part unused (fixed to be 0)
+//             ^ indicates undefined value
+//
+
+function Decoder(buffer, offset) {
+    this.offset = offset || 0;
+    this.buffer = buffer;
+}
+Decoder.prototype.map = function(length) {
+    var value = {};
+    for (var i = 0; i < length; i++) {
+        var key = this.parse();
+        value[key] = this.parse();
+    }
+    return value;
+};
+Decoder.prototype.bin = function(length) {
+    var value = bops.subarray(this.buffer, this.offset, this.offset + length);
+    this.offset += length;
+    return value;
+};
+Decoder.prototype.str = function(length) {
+    var value = bops.to(bops.subarray(this.buffer, this.offset, this.offset + length));
+    this.offset += length;
+    return value;
+};
+Decoder.prototype.array = function(length) {
+    var value = new Array(length);
+    for (var i = 0; i < length; i++) {
+        value[i] = this.parse();
+    }
+    return value;
+};
+Decoder.prototype.parse = function() {
+    var type = this.buffer[this.offset];
+    var value, length, extType;
+    // Positive FixInt
+    if ((type & 0x80) === 0x00) {
+        this.offset++;
+        return type;
+    }
+    // FixMap
+    if ((type & 0xf0) === 0x80) {
+        length = type & 0x0f;
+        this.offset++;
+        return this.map(length);
+    }
+    // FixArray
+    if ((type & 0xf0) === 0x90) {
+        length = type & 0x0f;
+        this.offset++;
+        return this.array(length);
+    }
+    // FixStr
+    if ((type & 0xe0) === 0xa0) {
+        length = type & 0x1f;
+        this.offset++;
+        return this.str(length);
+    }
+    // Negative FixInt
+    if ((type & 0xe0) === 0xe0) {
+        value = bops.readInt8(this.buffer, this.offset);
+        this.offset++;
+        return value;
+    }
+    switch (type) {
+        // nil
+        case 0xc0:
+            this.offset++;
+            return null;
+            // 0xc1: (never used)
+            // false
+        case 0xc2:
+            this.offset++;
+            return false;
+            // true
+        case 0xc3:
+            this.offset++;
+            return true;
+            // bin 8
+        case 0xc4:
+            length = bops.readUInt8(this.buffer, this.offset + 1);
+            this.offset += 2;
+            return this.bin(length);
+            // bin 16
+        case 0xc5:
+            length = bops.readUInt16BE(this.buffer, this.offset + 1);
+            this.offset += 3;
+            return this.bin(length);
+            // bin 32
+        case 0xc6:
+            length = bops.readUInt32BE(this.buffer, this.offset + 1);
+            this.offset += 5;
+            return this.bin(length);
+            // ext 8
+        case 0xc7:
+            length = bops.readUInt8(this.buffer, this.offset + 1);
+            extType = bops.readUInt8(this.buffer, this.offset + 2);
+            this.offset += 3;
+            return [extType, this.bin(length)];
+            // ext 16
+        case 0xc8:
+            length = bops.readUInt16BE(this.buffer, this.offset + 1);
+            extType = bops.readUInt8(this.buffer, this.offset + 3);
+            this.offset += 4;
+            return [extType, this.bin(length)];
+            // ext 32
+        case 0xc9:
+            length = bops.readUInt32BE(this.buffer, this.offset + 1);
+            extType = bops.readUInt8(this.buffer, this.offset + 5);
+            this.offset += 6;
+            return [extType, this.bin(length)];
+            // float 32
+        case 0xca:
+            value = bops.readFloatBE(this.buffer, this.offset + 1);
+            this.offset += 5;
+            return value;
+            // float 64 / double
+        case 0xcb:
+            value = bops.readDoubleBE(this.buffer, this.offset + 1);
+            this.offset += 9;
+            return value;
+            // uint8
+        case 0xcc:
+            value = this.buffer[this.offset + 1];
+            this.offset += 2;
+            return value;
+            // uint 16
+        case 0xcd:
+            value = bops.readUInt16BE(this.buffer, this.offset + 1);
+            this.offset += 3;
+            return value;
+            // uint 32
+        case 0xce:
+            value = bops.readUInt32BE(this.buffer, this.offset + 1);
+            this.offset += 5;
+            return value;
+            // uint64
+        case 0xcf:
+            value = bops.readUInt64BE(this.buffer, this.offset + 1);
+            this.offset += 9;
+            return value;
+            // int 8
+        case 0xd0:
+            value = bops.readInt8(this.buffer, this.offset + 1);
+            this.offset += 2;
+            return value;
+            // int 16
+        case 0xd1:
+            value = bops.readInt16BE(this.buffer, this.offset + 1);
+            this.offset += 3;
+            return value;
+            // int 32
+        case 0xd2:
+            value = bops.readInt32BE(this.buffer, this.offset + 1);
+            this.offset += 5;
+            return value;
+            // int 64
+        case 0xd3:
+            value = bops.readInt64BE(this.buffer, this.offset + 1);
+            this.offset += 9;
+            return value;
+
+            // fixext 1 / undefined
+        case 0xd4:
+            extType = bops.readUInt8(this.buffer, this.offset + 1);
+            value = bops.readUInt8(this.buffer, this.offset + 2);
+            this.offset += 3;
+            return (extType === 0 && value === 0) ? undefined : [extType, value];
+            // fixext 2
+        case 0xd5:
+            extType = bops.readUInt8(this.buffer, this.offset + 1);
+            this.offset += 2;
+            return [extType, this.bin(2)];
+            // fixext 4
+        case 0xd6:
+            extType = bops.readUInt8(this.buffer, this.offset + 1);
+            this.offset += 2;
+            return [extType, this.bin(4)];
+            // fixext 8
+        case 0xd7:
+            extType = bops.readUInt8(this.buffer, this.offset + 1);
+            this.offset += 2;
+            return [extType, this.bin(8)];
+            // fixext 16
+        case 0xd8:
+            extType = bops.readUInt8(this.buffer, this.offset + 1);
+            this.offset += 2;
+            return [extType, this.bin(16)];
+            // str 8
+        case 0xd9:
+            length = bops.readUInt8(this.buffer, this.offset + 1);
+            this.offset += 2;
+            return this.str(length);
+            // str 16
+        case 0xda:
+            length = bops.readUInt16BE(this.buffer, this.offset + 1);
+            this.offset += 3;
+            return this.str(length);
+            // str 32
+        case 0xdb:
+            length = bops.readUInt32BE(this.buffer, this.offset + 1);
+            this.offset += 5;
+            return this.str(length);
+            // array 16
+        case 0xdc:
+            length = bops.readUInt16BE(this.buffer, this.offset + 1);
+            this.offset += 3;
+            return this.array(length);
+            // array 32
+        case 0xdd:
+            length = bops.readUInt32BE(this.buffer, this.offset + 1);
+            this.offset += 5;
+            return this.array(length);
+            // map 16:
+        case 0xde:
+            length = bops.readUInt16BE(this.buffer, this.offset + 1);
+            this.offset += 3;
+            return this.map(length);
+            // map 32
+        case 0xdf:
+            length = bops.readUInt32BE(this.buffer, this.offset + 1);
+            this.offset += 5;
+            return this.map(length);
+            // buffer 16
+        case 0xd8:
+            length = bops.readUInt16BE(this.buffer, this.offset + 1);
+            this.offset += 3;
+            return this.buf(length);
+            // buffer 32
+        case 0xd9:
+            length = bops.readUInt32BE(this.buffer, this.offset + 1);
+            this.offset += 5;
+            return this.buf(length);
+    }
+
+    throw new Error("Unknown type 0x" + type.toString(16));
+};
+
+function decode(buffer) {
+    var decoder = new Decoder(buffer);
+    var value = decoder.parse();
+    if (decoder.offset !== buffer.length) throw new Error((buffer.length - decoder.offset) + " trailing bytes");
+    return value;
+}
+
+function encodeableKeys(value) {
+    return Object.keys(value).filter(function(e) {
+        return typeof value[e] !== 'function' || value[e].toJSON;
     });
+}
 
-    // msgpack.pack
-    function msgpackpack(data) { // @param Mix:
-        // @return ByteArray:
-        return encode([], data);
+function encode(value, buffer, offset) {
+    var type = typeof value;
+    var length, size;
+
+    // Strings Bytes
+    if (type === "string") {
+        value = bops.from(value);
+        length = value.length;
+        // fixstr
+        if (length < 0x20) {
+            buffer[offset] = length | 0xa0;
+            bops.copy(value, buffer, offset + 1);
+            return 1 + length;
+        }
+        // str 8
+        if (length < 0x100) {
+            buffer[offset] = 0xd9;
+            bops.writeUInt8(buffer, length, offset + 1);
+            bops.copy(value, buffer, offset + 2);
+            return 2 + length;
+        }
+        // str 16
+        if (length < 0x10000) {
+            buffer[offset] = 0xda;
+            bops.writeUInt16BE(buffer, length, offset + 1);
+            bops.copy(value, buffer, offset + 3);
+            return 3 + length;
+        }
+        // str 32
+        if (length < 0x100000000) {
+            buffer[offset] = 0xdb;
+            bops.writeUInt32BE(buffer, length, offset + 1);
+            bops.copy(value, buffer, offset + 5);
+            return 5 + length;
+        }
     }
 
-    // msgpack.unpack
-    function msgpackunpack(data) { // @param BinaryString/ByteArray:
-        // @return Mix:
-        return {
-            data: typeof data === "string" ? toByteArray(data) : data,
-            index: -1,
-            decode: decode
-        }.decode();
+    if (bops.is(value)) {
+        length = value.length;
+        // bin 8
+        if (length < 0x100) {
+            buffer[offset] = 0xc4;
+            bops.writeUInt8(buffer, length, offset + 1);
+            bops.copy(value, buffer, offset + 2);
+            return 2 + length;
+        }
+        // bin 16
+        if (length < 0x10000) {
+            buffer[offset] = 0xd8;
+            bops.writeUInt16BE(buffer, length, offset + 1);
+            bops.copy(value, buffer, offset + 3);
+            return 3 + length;
+        }
+        // bin 32
+        if (length < 0x100000000) {
+            buffer[offset] = 0xd9;
+            bops.writeUInt32BE(buffer, length, offset + 1);
+            bops.copy(value, buffer, offset + 5);
+            return 5 + length;
+        }
     }
 
-    // inner - encoder
-    function encode(rv, // @param ByteArray: result
-        mix) { // @param Mix: source data
-        var size = 0,
-            i = 0,
-            iz, c, ary, hash,
-            high, low, i64 = 0,
-            sign, exp, frac;
+    if (type === "number") {
+        // Floating Point
+        if ((value << 0) !== value) {
+            buffer[offset] = 0xcb;
+            bops.writeDoubleBE(buffer, value, offset + 1);
+            return 9;
+        }
 
-        if (mix == null) { // null or undefined
-            rv.push(0xc0);
+        // Integers
+        if (value >= 0) {
+            // positive fixnum
+            if (value < 0x80) {
+                buffer[offset] = value;
+                return 1;
+            }
+            // uint 8
+            if (value < 0x100) {
+                buffer[offset] = 0xcc;
+                buffer[offset + 1] = value;
+                return 2;
+            }
+            // uint 16
+            if (value < 0x10000) {
+                buffer[offset] = 0xcd;
+                bops.writeUInt16BE(buffer, value, offset + 1);
+                return 3;
+            }
+            // uint 32
+            if (value < 0x100000000) {
+                buffer[offset] = 0xce;
+                bops.writeUInt32BE(buffer, value, offset + 1);
+                return 5;
+            }
+            // uint 64
+            if (value < 0x10000000000000000) {
+                buffer[offset] = 0xcf;
+                bops.writeUInt64BE(buffer, value, offset + 1);
+                return 9;
+            }
+            throw new Error("Number too big 0x" + value.toString(16));
+        }
+        // negative fixnum
+        if (value >= -0x20) {
+            bops.writeInt8(buffer, value, offset);
+            return 1;
+        }
+        // int 8
+        if (value >= -0x80) {
+            buffer[offset] = 0xd0;
+            bops.writeInt8(buffer, value, offset + 1);
+            return 2;
+        }
+        // int 16
+        if (value >= -0x8000) {
+            buffer[offset] = 0xd1;
+            bops.writeInt16BE(buffer, value, offset + 1);
+            return 3;
+        }
+        // int 32
+        if (value >= -0x80000000) {
+            buffer[offset] = 0xd2;
+            bops.writeInt32BE(buffer, value, offset + 1);
+            return 5;
+        }
+        // int 64
+        if (value >= -0x8000000000000000) {
+            buffer[offset] = 0xd3;
+            bops.writeInt64BE(buffer, value, offset + 1);
+            return 9;
+        }
+        throw new Error("Number too small -0x" + value.toString(16).substr(1));
+    }
+
+    if (type === "undefined") {
+        buffer[offset] = 0xd4;
+        buffer[offset + 1] = 0x00; // fixext special type/value
+        buffer[offset + 2] = 0x00;
+        return 1;
+    }
+
+    // null
+    if (value === null) {
+        buffer[offset] = 0xc0;
+        return 1;
+    }
+
+    // Boolean
+    if (type === "boolean") {
+        buffer[offset] = value ? 0xc3 : 0xc2;
+        return 1;
+    }
+
+    // Custom toJSON function.
+    if (typeof value.toJSON === 'function') {
+        return encode(value.toJSON(), buffer, offset);
+    }
+
+    // Container Types
+    if (type === "object") {
+
+        size = 0;
+        var isArray = Array.isArray(value);
+
+        if (isArray) {
+            length = value.length;
         } else {
-            switch (typeof mix) {
-                case "boolean":
-                    rv.push(mix ? 0xc3 : 0xc2);
-                    break;
-                case "number":
-                    if (mix !== mix) { // isNaN
-                        rv.push(0xcb, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff); // quiet NaN
-                    } else if (mix === Infinity) {
-                        rv.push(0xcb, 0x7f, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00); // positive infinity
-                    } else if (Math.floor(mix) === mix) {
-                        if (mix < 0) { // int
-                            if (mix >= -32) { // negative fixnum
-                                rv.push(0xe0 + mix + 32);
-                            } else if (mix > -0x80) {
-                                rv.push(0xd0, mix + 0x100);
-                            } else if (mix > -0x8000) {
-                                mix += 0x10000;
-                                rv.push(0xd1, mix >> 8, mix & 0xff);
-                            } else if (mix > -0x80000000) {
-                                mix += 0x100000000;
-                                rv.push(0xd2, mix >>> 24, (mix >> 16) & 0xff, (mix >> 8) & 0xff, mix & 0xff);
-                            } else {
-                                ++i64;
-                            }
-                        } else { // uint
-                            if (mix < 0x80) {
-                                rv.push(mix); // positive fixnum
-                            } else if (mix < 0x100) { // uint 8
-                                rv.push(0xcc, mix);
-                            } else if (mix < 0x10000) { // uint 16
-                                rv.push(0xcd, mix >> 8, mix & 0xff);
-                            } else if (mix < 0x100000000) { // uint 32
-                                rv.push(0xce, mix >>> 24, (mix >> 16) & 0xff, (mix >> 8) & 0xff, mix & 0xff);
-                            } else {
-                                ++i64;
-                            }
-                        }
-                        if (i64) {
-                            high = Math.floor(mix / 0x100000000);
-                            low = mix & (0x100000000 - 1);
-                            rv.push(mix < 0 ? 0xd3 : 0xcf, (high >> 24) & 0xff, (high >> 16) & 0xff, (high >> 8) & 0xff, high & 0xff, (low >> 24) & 0xff, (low >> 16) & 0xff, (low >> 8) & 0xff, low & 0xff);
-                        }
-                    } else { // double
-                        // THX! edvakf
-                        // http://javascript.g.hatena.ne.jp/edvakf/20100614/1276503044
-                        hash = _bit2num;
-                        sign = mix < 0;
-                        sign && (mix *= -1);
+            var keys = encodeableKeys(value);
+            length = keys.length;
+        }
 
-                        // add offset 1023 to ensure positive
-                        exp = Math.log(mix) / Math.LN2 + 1023 | 0;
+        // fixarray
+        if (length < 0x10) {
+            buffer[offset] = length | (isArray ? 0x90 : 0x80);
+            size = 1;
+        }
+        // array 16 / map 16
+        else if (length < 0x10000) {
+            buffer[offset] = isArray ? 0xdc : 0xde;
+            bops.writeUInt16BE(buffer, length, offset + 1);
+            size = 3;
+        }
+        // array 32 / map 32
+        else if (length < 0x100000000) {
+            buffer[offset] = isArray ? 0xdd : 0xdf;
+            bops.writeUInt32BE(buffer, length, offset + 1);
+            size = 5;
+        }
 
-                        // shift 52 - (exp - 1023) bits to make integer part exactly 53 bits,
-                        // then throw away trash less than decimal point
-                        frac = (Math.floor(mix * Math.pow(2, 52 + 1023 - exp))).
-                        toString(2).slice(1);
-
-                        // exp is between 1 and 2047. make it 11 bits
-                        exp = ("000000000" + exp.toString(2)).slice(-11);
-
-                        ary = (+sign + exp + frac).match(_split8char);
-                        rv.push(0xcb, hash[ary[0]], hash[ary[1]],
-                            hash[ary[2]], hash[ary[3]],
-                            hash[ary[4]], hash[ary[5]],
-                            hash[ary[6]], hash[ary[7]]);
-                    }
-                    break;
-                case "string":
-                    // utf8.encode
-                    for (ary = [], iz = mix.length, i = 0; i < iz; ++i) {
-                        c = mix.charCodeAt(i);
-                        if (c < 0x80) { // ASCII(0x00 ~ 0x7f)
-                            ary.push(c & 0x7f);
-                        } else if (c < 0x0800) {
-                            ary.push(((c >>> 6) & 0x1f) | 0xc0, (c & 0x3f) | 0x80);
-                        } else if (c < 0x10000) {
-                            ary.push(((c >>> 12) & 0x0f) | 0xe0, ((c >>> 6) & 0x3f) | 0x80, (c & 0x3f) | 0x80);
-                        }
-                    }
-                    setType(rv, 32, ary.length, [0xa0, 0xda, 0xdb]);
-                    Array.prototype.push.apply(rv, ary);
-                    break;
-                default: // array or hash
-                    if (Object.prototype.toString.call(mix) === "[object Array]") { // array
-                        size = mix.length;
-                        setType(rv, 16, size, [0x90, 0xdc, 0xdd]);
-                        for (; i < size; ++i) {
-                            encode(rv, mix[i]);
-                        }
-                    } else { // hash
-                        if (Object.keys) {
-                            size = Object.keys(mix).length;
-                        } else {
-                            for (i in mix) {
-                                mix.hasOwnProperty(i) && ++size;
-                            }
-                        }
-                        setType(rv, 16, size, [0x80, 0xde, 0xdf]);
-                        for (i in mix) {
-                            encode(rv, i);
-                            encode(rv, mix[i]);
-                        }
-                    }
+        if (isArray) {
+            for (var i = 0; i < length; i++) {
+                size += encode(value[i], buffer, offset + size);
             }
-        }
-        return rv;
-    }
-
-    // inner - decoder
-    function decode() { // @return Mix:
-        var rv, undef, size, i = 0,
-            iz, msb = 0,
-            c, sign, exp, frac, key,
-            that = this,
-            data = that.data,
-            type = data[++that.index];
-
-        if (type >= 0xe0) { // Negative FixNum (111x xxxx) (-32 ~ -1)
-            return type - 0x100;
-        }
-        if (type < 0x80) { // Positive FixNum (0xxx xxxx) (0 ~ 127)
-            return type;
-        }
-        if (type < 0x90) { // FixMap (1000 xxxx)
-            size = type - 0x80;
-            type = 0x80;
-        } else if (type < 0xa0) { // FixArray (1001 xxxx)
-            size = type - 0x90;
-            type = 0x90;
-        } else if (type < 0xc0) { // FixRaw (101x xxxx)
-            size = type - 0xa0;
-            type = 0xa0;
-        }
-        switch (type) {
-            case 0xc0:
-                return null;
-            case 0xc2:
-                return false;
-            case 0xc3:
-                return true;
-            case 0xca:
-                rv = readByte(that, 4); // float
-                sign = rv & _sign[32]; //  1bit
-                exp = (rv >> 23) & 0xff; //  8bits
-                frac = rv & 0x7fffff; // 23bits
-                if (!rv || rv === 0x80000000) { // 0.0 or -0.0
-                    return 0;
-                }
-                if (exp === 0xff) { // NaN or Infinity
-                    return frac ? NaN : Infinity;
-                }
-                return (sign ? -1 : 1) *
-                    (frac | 0x800000) * Math.pow(2, exp - 127 - 23); // 127: bias
-            case 0xcb:
-                rv = readByte(that, 4); // double
-                sign = rv & _sign[32]; //  1bit
-                exp = (rv >> 20) & 0x7ff; // 11bits
-                frac = rv & 0xfffff; // 52bits - 32bits (high word)
-                if (!rv || rv === 0x80000000) { // 0.0 or -0.0
-                    return 0;
-                }
-                if (exp === 0x7ff) { // NaN or Infinity
-                    readByte(that, 4); // seek index
-                    return frac ? NaN : Infinity;
-                }
-                return (sign ? -1 : 1) *
-                    ((frac | 0x100000) * Math.pow(2, exp - 1023 - 20) // 1023: bias
-                        + readByte(that, 4) * Math.pow(2, exp - 1023 - 52));
-            case 0xcf:
-                return readByte(that, 4) * Math.pow(2, 32) +
-                    readByte(that, 4); // uint 64
-            case 0xce:
-                return readByte(that, 4); // uint 32
-            case 0xcd:
-                return readByte(that, 2); // uint 16
-            case 0xcc:
-                return readByte(that, 1); // uint 8
-            case 0xd3:
-                return decodeInt64(that); // int 64
-            case 0xd2:
-                rv = readByte(that, 4); // int 32
-            case 0xd1:
-                rv === undef && (rv = readByte(that, 2)); // int 16
-            case 0xd0:
-                rv === undef && (rv = readByte(that, 1)); // int 8
-                msb = 4 << ((type & 0x3) + 1); // 8, 16, 32
-                return rv < _sign[msb] ? rv : rv - _sign[msb] * 2;
-            case 0xdb:
-                size = readByte(that, 4); // raw 32
-            case 0xda:
-                size === undef && (size = readByte(that, 2)); // raw 16
-            case 0xa0:
-                i = that.index + 1; // raw
-                that.index += size;
-                // utf8.decode
-                for (rv = [], ri = -1, iz = i + size; i < iz; ++i) {
-                    c = data[i]; // first byte
-                    if (c < 0x80) { // ASCII(0x00 ~ 0x7f)
-                        rv[++ri] = c;
-                    } else if (c < 0xe0) {
-                        rv[++ri] = (c & 0x1f) << 6 | (data[++i] & 0x3f);
-                    } else if (c < 0xf0) {
-                        rv[++ri] = (c & 0x0f) << 12 | (data[++i] & 0x3f) << 6 | (data[++i] & 0x3f);
-                    }
-                }
-                return String.fromCharCode.apply(null, rv);
-            case 0xdf:
-                size = readByte(that, 4); // map 32
-            case 0xde:
-                size === undef && (size = readByte(that, 2)); // map 16
-            case 0x80:
-                for (rv = {}; i < size; ++i) { // map
-                    key = that.decode();
-                    rv[key] = that.decode(); // key/value pair
-                }
-                return rv;
-            case 0xdd:
-                size = readByte(that, 4); // array 32
-            case 0xdc:
-                size === undef && (size = readByte(that, 2)); // array 16
-            case 0x90:
-                for (rv = []; i < size; ++i) { // array
-                    rv.push(that.decode());
-                }
-        }
-        return rv;
-    }
-
-    // inner - read byte
-    function readByte(that, // @param Object:
-        size) { // @param Number:
-        // @return Number:
-        var rv = 0,
-            data = that.data,
-            i = that.index;
-
-        switch (size) {
-            case 4:
-                rv += data[++i] * 0x1000000 + (data[++i] << 16);
-            case 2:
-                rv += data[++i] << 8;
-            case 1:
-                rv += data[++i];
-        }
-        that.index = i;
-        return rv;
-    }
-
-    // inner - decode int64
-    function decodeInt64(that) { // @param Object:
-        // @return Number:
-        var rv, overflow = 0,
-            bytes = that.data.slice(that.index + 1, that.index + 9);
-
-        that.index += 8;
-
-        // avoid overflow
-        if (bytes[0] & 0x80) {
-
-            ++overflow;
-            bytes[0] ^= 0xff;
-            bytes[1] ^= 0xff;
-            bytes[2] ^= 0xff;
-            bytes[3] ^= 0xff;
-            bytes[4] ^= 0xff;
-            bytes[5] ^= 0xff;
-            bytes[6] ^= 0xff;
-            bytes[7] ^= 0xff;
-        }
-        rv = bytes[0] * 0x100000000000000 + bytes[1] * 0x1000000000000 + bytes[2] * 0x10000000000 + bytes[3] * 0x100000000 + bytes[4] * 0x1000000 + bytes[5] * 0x10000 + bytes[6] * 0x100 + bytes[7];
-        return overflow ? (rv + 1) * -1 : rv;
-    }
-
-    // inner - set type and fixed size
-    function setType(rv, // @param ByteArray: result
-        fixSize, // @param Number: fix size. 16 or 32
-        size, // @param Number: size
-        types) { // @param ByteArray: type formats. eg: [0x90, 0xdc, 0xdd]
-        if (size < fixSize) {
-            rv.push(types[0] + size);
-        } else if (size < 0x10000) { // 16
-            rv.push(types[1], size >> 8, size & 0xff);
-        } else if (size < 0x100000000) { // 32
-            rv.push(types[2], size >>> 24, (size >> 16) & 0xff, (size >> 8) & 0xff, size & 0xff);
-        }
-    }
-
-    // msgpack.download - load from server
-    function msgpackdownload(url, // @param String:
-        option, // @param Hash: { worker, timeout, before, after }
-        //    option.worker - Boolean(= false): true is use WebWorkers
-        //    option.timeout - Number(= 10): timeout sec
-        //    option.before  - Function: before(xhr, option)
-        //    option.after   - Function: after(xhr, option, { status, ok })
-        callback) { // @param Function: callback(data, option, { status, ok })
-        //    data   - Mix/null:
-        //    option - Hash:
-        //    status - Number: HTTP status code
-        //    ok     - Boolean:
-        option.method = "GET";
-        option.binary = true;
-        ajax(url, option, callback);
-    }
-
-    // msgpack.upload - save to server
-    function msgpackupload(url, // @param String:
-        option, // @param Hash: { data, worker, timeout, before, after }
-        //    option.data - Mix:
-        //    option.worker - Boolean(= false): true is use WebWorkers
-        //    option.timeout - Number(= 10): timeout sec
-        //    option.before  - Function: before(xhr, option)
-        //    option.after   - Function: after(xhr, option, { status, ok })
-        callback) { // @param Function: callback(data, option, { status, ok })
-        //    data   - String: responseText
-        //    option - Hash:
-        //    status - Number: HTTP status code
-        //    ok     - Boolean:
-        option.method = "PUT";
-        option.binary = true;
-
-        if (option.worker && typeof Worker !== 'undefined') {
-            var worker = new Worker(msgpack.worker);
-
-            worker.onmessage = function(event) {
-                option.data = event.data;
-                ajax(url, option, callback);
-            };
-            worker.postMessage({
-                method: "pack",
-                data: option.data
-            });
         } else {
-            // pack and base64 encode
-            option.data = base64encode(msgpackpack(option.data));
-            ajax(url, option, callback);
-        }
-    }
-
-    // inner -
-    function ajax(url, // @param String:
-        option, // @param Hash: { data, ifmod, method, timeout,
-        //                header, binary, before, after, worker }
-        //    option.data    - Mix: upload data
-        //    option.ifmod   - Boolean: true is "If-Modified-Since" header
-        //    option.method  - String: "GET", "POST", "PUT"
-        //    option.timeout - Number(= 10): timeout sec
-        //    option.header  - Hash(= {}): { key: "value", ... }
-        //    option.binary  - Boolean(= false): true is binary data
-        //    option.before  - Function: before(xhr, option)
-        //    option.after   - Function: after(xhr, option, { status, ok })
-        //    option.worker  - Boolean(= false): true is use WebWorkers
-        callback) { // @param Function: callback(data, option, { status, ok })
-        //    data   - String/Mix/null:
-        //    option - Hash:
-        //    status - Number: HTTP status code
-        //    ok     - Boolean:
-        function readyStateChange() {
-            if (xhr.readyState === 4) {
-                var data, status = xhr.status,
-                    worker, byteArray,
-                    rv = {
-                        status: status,
-                        ok: status >= 200 && status < 300
-                    };
-
-                if (!run++) {
-                    if (method === "PUT") {
-                        data = rv.ok ? xhr.responseText : "";
-                    } else {
-                        if (rv.ok) {
-                            if (option.worker && typeof Worker !== 'undefined') {
-                                worker = new Worker(msgpack.worker);
-                                worker.onmessage = function(event) {
-                                    callback(event.data, option, rv);
-                                };
-                                worker.postMessage({
-                                    method: "unpack",
-                                    data: xhr.responseText
-                                });
-                                gc();
-                                return;
-                            } else {
-                                byteArray = toByteArray(xhr.responseText);
-                                data = msgpackunpack(byteArray);
-                            }
-                        }
-                    }
-                    after && after(xhr, option, rv);
-                    callback(data, option, rv);
-                    gc();
-                }
+            for (var i = 0; i < length; i++) {
+                var key = keys[i];
+                size += encode(key, buffer, offset + size);
+                size += encode(value[key], buffer, offset + size);
             }
         }
 
-        function ng(abort, status) {
-            if (!run++) {
-                var rv = {
-                    status: status || 400,
-                    ok: false
-                };
+        return size;
+    }
+    if (type === "function") return undefined;
+    throw new Error("Unknown type " + type);
+}
 
-                after && after(xhr, option, rv);
-                callback(null, option, rv);
-                gc(abort);
-            }
+function sizeof(value) {
+    var type = typeof value;
+    var length, size;
+
+    // Raw Bytes
+    if (type === "string") {
+        // TODO: this creates a throw-away buffer which is probably expensive on browsers.
+        length = bops.from(value).length;
+        if (length < 0x20) {
+            return 1 + length;
         }
-
-        function gc(abort) {
-            abort && xhr && xhr.abort && xhr.abort();
-            watchdog && (clearTimeout(watchdog), watchdog = 0);
-            xhr = null;
-            typeof addEventListener !== 'undefined' &&
-                removeEventListener("beforeunload", ng, false);
+        if (length < 0x100) {
+            return 2 + length;
         }
-
-        var watchdog = 0,
-            method = option.method || "GET",
-            header = option.header || {},
-            before = option.before,
-            after = option.after,
-            data = option.data || null,
-            xhr = typeof XMLHttpRequest !== 'undefined' ? new XMLHttpRequest() :
-            typeof ActiveXObject !== 'undefined' ? new ActiveXObject("Microsoft.XMLHTTP") :
-            null,
-            run = 0,
-            i,
-            overrideMimeType = "overrideMimeType",
-            setRequestHeader = "setRequestHeader",
-            getbinary = method === "GET" && option.binary;
-
-        try {
-            xhr.onreadystatechange = readyStateChange;
-            xhr.open(method, url, true); // ASync
-
-            before && before(xhr, option);
-
-            getbinary && xhr[overrideMimeType] &&
-                xhr[overrideMimeType]("text/plain; charset=x-user-defined");
-            data &&
-                xhr[setRequestHeader]("Content-Type",
-                    "application/x-www-form-urlencoded");
-
-            for (i in header) {
-                xhr[setRequestHeader](i, header[i]);
-            }
-
-            typeof addEventListener !== 'undefined' &&
-                addEventListener("beforeunload", ng, false); // 400: Bad Request
-
-            xhr.send(data);
-            watchdog = setTimeout(function() {
-                ng(1, 408); // 408: Request Time-out
-            }, (option.timeout || 10) * 1000);
-        } catch (err) {
-            ng(0, 400); // 400: Bad Request
+        if (length < 0x10000) {
+            return 3 + length;
+        }
+        if (length < 0x100000000) {
+            return 5 + length;
         }
     }
 
-    // inner - BinaryString To ByteArray
-    function toByteArray(data) { // @param BinaryString: "\00\01"
-        // @return ByteArray: [0x00, 0x01]
-        var rv = [],
-            bin2num = _bin2num,
-            remain,
-            ary = data.split(""),
-            i = -1,
-            iz;
-
-        iz = ary.length;
-        remain = iz % 8;
-
-        while (remain--) {
-            ++i;
-            rv[i] = bin2num[ary[i]];
+    if (bops.is(value)) {
+        length = value.length;
+        if (length < 0x100) {
+            return 2 + length;
         }
-        remain = iz >> 3;
-        while (remain--) {
-            rv.push(bin2num[ary[++i]], bin2num[ary[++i]],
-                bin2num[ary[++i]], bin2num[ary[++i]],
-                bin2num[ary[++i]], bin2num[ary[++i]],
-                bin2num[ary[++i]], bin2num[ary[++i]]);
+        if (length < 0x10000) {
+            return 3 + length;
         }
-        return rv;
+        if (length < 0x100000000) {
+            return 5 + length;
+        }
     }
 
-    // inner - base64.encode
-    function base64encode(data) { // @param ByteArray:
-        // @return Base64String:
-        var rv = [],
-            c = 0,
-            i = -1,
-            iz = data.length,
-            pad = [0, 2, 1][data.length % 3],
-            num2bin = _num2bin,
-            num2b64 = _num2b64;
+    if (type === "number") {
+        // Floating Point
+        // double
+        if (value << 0 !== value) return 9;
 
-        if (typeof btoa !== 'undefined') {
-            while (i < iz) {
-                rv.push(num2bin[data[++i]]);
+        // Integers
+        if (value >= 0) {
+            // positive fixnum
+            if (value < 0x80) return 1;
+            // uint 8
+            if (value < 0x100) return 2;
+            // uint 16
+            if (value < 0x10000) return 3;
+            // uint 32
+            if (value < 0x100000000) return 5;
+            // uint 64
+            if (value < 0x10000000000000000) return 9;
+            throw new Error("Number too big 0x" + value.toString(16));
+        }
+        // negative fixnum
+        if (value >= -0x20) return 1;
+        // int 8
+        if (value >= -0x80) return 2;
+        // int 16
+        if (value >= -0x8000) return 3;
+        // int 32
+        if (value >= -0x80000000) return 5;
+        // int 64
+        if (value >= -0x8000000000000000) return 9;
+        throw new Error("Number too small -0x" + value.toString(16).substr(1));
+    }
+
+    // Boolean, null
+    if (type === "boolean" || value === null) return 1;
+    if (type === 'undefined') return 3;
+
+    if (typeof value.toJSON === 'function') {
+        return sizeof(value.toJSON());
+    }
+
+    // Container Types
+    if (type === "object") {
+        if ('function' === typeof value.toJSON) {
+            value = value.toJSON();
+        }
+
+        size = 0;
+        if (Array.isArray(value)) {
+            length = value.length;
+            for (var i = 0; i < length; i++) {
+                size += sizeof(value[i]);
             }
-            return btoa(rv.join(""));
+        } else {
+            var keys = encodeableKeys(value);
+            length = keys.length;
+            for (var i = 0; i < length; i++) {
+                var key = keys[i];
+                size += sizeof(key) + sizeof(value[key]);
+            }
         }
-        --iz;
-        while (i < iz) {
-            c = (data[++i] << 16) | (data[++i] << 8) | (data[++i]); // 24bit
-            rv.push(num2b64[(c >> 18) & 0x3f],
-                num2b64[(c >> 12) & 0x3f],
-                num2b64[(c >> 6) & 0x3f],
-                num2b64[c & 0x3f]);
+        if (length < 0x10) {
+            return 1 + size;
         }
-        pad > 1 && (rv[rv.length - 2] = "=");
-        pad > 0 && (rv[rv.length - 1] = "=");
-        return rv.join("");
+        if (length < 0x10000) {
+            return 3 + size;
+        }
+        if (length < 0x100000000) {
+            return 5 + size;
+        }
+        throw new Error("Array or object too long 0x" + length.toString(16));
     }
-
-    // --- init ---
-    (function() {
-        var i = 0,
-            v;
-
-        for (; i < 0x100; ++i) {
-            v = String.fromCharCode(i);
-            _bit2num[("0000000" + i.toString(2)).slice(-8)] = i;
-            _bin2num[v] = i; // "\00" -> 0x00
-            _num2bin[i] = v; //     0 -> "\00"
-        }
-        // http://twitter.com/edvakf/statuses/15576483807
-        for (i = 0x80; i < 0x100; ++i) { // [Webkit][Gecko]
-            _bin2num[String.fromCharCode(0xf700 + i)] = i; // "\f780" -> 0x80
-        }
-    })();
-
-    module.exports = {
-        pack: msgpackpack, // msgpack.pack(data:Mix):ByteArray
-        unpack: msgpackunpack, // msgpack.unpack(data:BinaryString/ByteArray):Mix
-        worker: "msgpack.js", // msgpack.worker - WebWorkers script filename
-        upload: msgpackupload, // msgpack.upload(url:String, option:Hash, callback:Function)
-        download: msgpackdownload // msgpack.download(url:String, option:Hash, callback:Function)
-    };
-})();
+    if (type === "function") {
+        return 0;
+    }
+    throw new Error("Unknown type " + type);
+}

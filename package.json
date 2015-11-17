@@ -4,17 +4,22 @@
   "description": "",
   "main": "app.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node ./app"
   },
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "koa-conditional-get": "^1.0.3",
-    "koa-etag": "^2.0.0",
-    "koa-gzip": "^0.1.0",
-    "koa-static": "^1.4.9",
-    "koa.io": "0.0.3",
+    "babel-preset-es2015": "^6.1.18",
+    "babel-preset-stage-3": "^6.1.18",
+    "browserify": "^12.0.1",
+    "msgpack": "file:msgpack",
     "sodium": "^1.0.22",
+    "uglifyify": "^3.0.1",
+    "uglifyjs": "^2.4.10",
     "yub": "^0.10.10"
+  },
+  "devDependencies": {
+    "babelify": "^7.2.0"
   }
 }

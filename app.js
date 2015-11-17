@@ -1,15 +1,19 @@
 'use strict';
 
-let koa = require('koa.io');
-let app = koa();
+let express = require('express');
+var app = express();
+var server = require('http').createServer(app);
+var io = require('socket.io')(server, {
+	path: '/io'
+});
 
 let yubi = require('yub');
     yubi.init('24716', 'pdLmq54ttw8L01lVsMi8egPwgoY=');
 
-let msgpack = require('./msgpack'),
+let msgpack = require('msgpack'),
     helpers = new (require('./helpers'));
 
-let arr = (item) => Array.prototype.slice.call(item);
+let arr = item => Array.prototype.slice.call(item);
 
 let crypto = require('crypto');
 let sodium = require('sodium');
@@ -18,79 +22,126 @@ let assert = require('assert');
 
 let users = require('./users.json');
 
-app.use(require('koa-gzip')());
-app.use(require('koa-conditional-get')());
-app.use(require('koa-etag')());
+io.on('connection', sock => {
+	let user = {};
 
-app.use(require('koa-static')('static'));
+	sock.on('handshake', (packet, checksum) => {
+		if (packet && checksum) {
+			try {
+				// verify checksum
+				if (helpers.bsd16(packet) !== checksum)
+					throw new Error('Bad checksum.');
 
-// middleware for koa
-app.use(function*() {
+				// unpack payload
+				let upacket = packet.split('').map((item) => item.charCodeAt(0));
+				    upacket = msgpack.unpack(new Buffer(upacket));
 
-});
+				if (!(upacket.user in users))
+					throw new Error('Invalid user.');
 
-// middleware for socket.io's connect and disconnect
-app.io.use(function*(next) {
-	yield* next;
-});
+				if (helpers.isArray(upacket.authedHandshake, 32)
+				 && helpers.isArray(upacket.nonce, 24)
+				 && helpers.isArray(upacket.publicKey, 32)
+				) {
+					let nonce = new Buffer(upacket.nonce);
+					let publicKey = new Buffer(upacket.publicKey);
 
-// router for socket event
-app.io.route('handshake', function*(msg) {
-	if (this.data.length === 2) {
-		let packet = this.data[0], checksum = this.data[1];
+					/* Auth(H(nonce, secret) λ publickey) */
+					let authedHandshake = new Buffer(upacket.authedHandshake);
 
-		try {
-			// verify checksum
-			if (helpers.bsd16(packet) !== checksum)
-				throw new Error('Bad checksum.');
+					// sha256 hash of secret
+					let secretHash = crypto.createHash('sha256').update(users[upacket.user].secret).digest();
 
-			// unpack payload
-			let upacket = packet.split('').map((item) => item.charCodeAt(0));
-			    upacket = msgpack.unpack(Buffer(upacket));
+					// verify that user is in possession of correct hash
+					if (sodium.api.crypto_auth_verify(authedHandshake, nonce, secretHash)) {
+						throw new Error('Invalid secret.');
+					}
 
-			if (!(upacket.user in users))
-				throw new Error('Invalid user.');
+					user.alice = {
+						nonce: nonce,
+						publicKey: publicKey,
+						secretHash: secretHash,
+						userName: upacket.user
+					};
 
-			if (helpers.isArray(upacket.authedHandshake, 32)
-			 && helpers.isArray(upacket.nonce, 24)
-			 && helpers.isArray(upacket.publicKey, 32)
-			) {
-				let nonce = Buffer(upacket.nonce);
-				let publicKey = Buffer(upacket.publicKey);
+					user.bob = sodium.api.crypto_box_keypair();
 
-				/* Auth(H(nonce, secret) λ publickey) */
-				let authedHandshake = Buffer(upacket.authedHandshake);
+					user.bob.nonce = new Buffer(sodium.api.crypto_box_NONCEBYTES);
 
-				// sha256 hash of secret
-				let secretHash = crypto.createHash('sha256').update(users[upacket.user].secret).digest();
+					sodium.api.randombytes_buf(user.bob.nonce);
 
-				// verify that user is in possession of correct hash
-				if (sodium.api.crypto_auth_verify(authedHandshake, nonce, secretHash)) {
-					throw new Error('Invalid secret.');
+					sock.emit('rpc', msgpack.pack({
+						type: 'handshake',
+						// used for ed25519
+						publicKey: arr(user.bob.publicKey),
+						nonce: arr(user.bob.nonce)
+					}));
+				}
+			} catch(e) {
+				return sock.emit('err', e.message);
+			}
+		}
+	});
+
+	sock.on('post-handshake', cipher => {
+		let plaintext = String.fromCharCode.apply(String, sodium.api.crypto_box_open_easy(
+			new Buffer(cipher),
+			user.alice.nonce,
+			user.alice.publicKey,
+			user.bob.secretKey
+		));
+
+		if (plaintext === 'init') {
+			user.alice.authenticated = true;
+
+			sock.emit('post-auth', user.alice.userName, arr(sodium.api.crypto_auth(user.bob.nonce, user.alice.secretHash)));
+		}
+	});
+
+	sock.on('command', cmd => {
+		if (!user.alice.authenticated) {
+			return;
+		}
+
+		if (users[user.alice.userName].yubi && !user.alice.yubiAuthenticated) {
+			if (cmd.length !== 2 || cmd[0] !== 'yubi') {
+				return sock.emit('err', `'${user.alice.userName}' requires yubikey authentication.`);
+			}
+
+			yubi.verify(cmd[1], function(err, data) {
+				if (err) {
+					return sock.emit('err', err.message);
 				}
 
-				this.keyChain = {
-					nonce: nonce,
-					publicKey: publicKey
-				};
+				let userYubi = users[user.alice.userName].yubi;
 
-				this.privateKeyChain = sodium.api.crypto_box_keypair();
+				console.log(userYubi, data);
 
-				this.privateKeyChain.nonce = new Buffer(sodium.api.crypto_box_NONCEBYTES);
+				if (!data.valid || data.serial !== userYubi.serial || data.identity !== userYubi.identity) {
+					return sock.emit('err', 'OTP rejected.');
+				}
 
-				sodium.api.randombytes_buf(this.privateKeyChain.nonce);
+				user.alice.yubiAuthenticated = true;
 
-				this.emit('rpc', msgpack.pack({
-					type: 'handshake',
-					// used for ed25519
-					publicKey: arr(this.privateKeyChain.publicKey),
-					nonce: arr(this.privateKeyChain.nonce)
-				}));
-			}
-		} catch(e) {
-			return this.emit('err', e.message);
+				return sock.emit('info', 'OTP accepted.');
+			});
 		}
-	}
+
+		return sock.emit('info', 'Hi.');
+	});
+
+	sock.error(err => console.log(err));
 });
 
-app.listen(3000);
+
+let assetSource = './static';
+
+console.log('Using \'%s\' for static assets.', assetSource);
+
+app.use(express.static(assetSource, {
+	// allow downstream services to respond first
+	etag: true,
+	maxage: 6 * 3600
+}));
+
+server.listen(3000);
