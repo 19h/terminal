@@ -255,15 +255,6 @@ class apx extends events {
 				for (; i < l; i++) c = (((((c >>> 1) + ((c & 1) << 15)) | 0) + (arr[i] & 0xff)) & 0xffff) | 0;
 
 				return c;
-			},
-			arr2uint8: arr => {
-				let i = 0, u8 = new Uint8Array(arr.length);
-
-				for(; i < arr.length; ++i) {
-					u8[i] = arr[i];
-				}
-
-				return u8;
 			}
 		};
 
@@ -357,8 +348,8 @@ class apx extends events {
 
 	digestHandshake (publicKey, nonce) {
 		this.bob = {
-			publicKey: this.helpers.arr2uint8(publicKey),
-			nonce: this.helpers.arr2uint8(nonce)
+			publicKey: Uint8Array.from(publicKey),
+			nonce: Uint8Array.from(nonce)
 		};
 
 		let cipher = sodium.crypto_box_easy(
@@ -373,8 +364,6 @@ class apx extends events {
 
 	handshake () {
 		let user = localStorage.id;
-
-		let arr = item => Array.prototype.slice.call(item);
 
 		let seed = {
 			user: user,

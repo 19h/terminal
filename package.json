@@ -13,7 +13,7 @@
     "babel-preset-es2015": "^6.1.18",
     "babel-preset-stage-3": "^6.1.18",
     "browserify": "^12.0.1",
-    "msgpack": "file:msgpack",
+    "msgpack": "^1.0.2",
     "sodium": "^1.0.22",
     "uglifyify": "^3.0.1",
     "uglifyjs": "^2.4.10",
