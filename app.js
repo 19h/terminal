@@ -1,40 +1,82 @@
 'use strict';
 
-let express = require('express');
-var app = express();
-var server = require('http').createServer(app);
-var io = require('socket.io')(server, {
+import crypto from 'crypto';
+
+import express from 'express';
+import socketio from 'socket.io';
+
+import sodium from 'sodium';
+
+import yubi from 'yub';
+import msgpack from 'msgpack';
+
+import users from './users.json';
+
+import {
+	createServer
+} from 'http';
+
+import {
+	Helpers
+} from './helpers';
+
+const helpers = new Helpers();
+
+const app = express();
+
+const server = createServer(app);
+
+const io = socketio(server, {
 	path: '/io'
 });
 
-let yubi = require('yub');
-    yubi.init('24716', 'pdLmq54ttw8L01lVsMi8egPwgoY=');
+yubi.init('24716', 'pdLmq54ttw8L01lVsMi8egPwgoY=');
 
-let msgpack = require('msgpack'),
-    helpers = new (require('./helpers'));
+class Handler {
+	constructor ({sock, user}) {
+		this.user = user;
+		this.sock = sock;
+	}
 
-let arr = item => Array.prototype.slice.call(item);
+	getUser () {
+		return this.user;
+	}
 
-let crypto = require('crypto');
-let sodium = require('sodium');
+	commitMessage (msg) {
+		msg = msgpack.pack(msg);
 
-let assert = require('assert');
+		const cipher = sodium.api.crypto_box_easy(
+			msg,
+			this.user.bob.nonce,
+			this.user.alice.publicKey,
+			this.user.bob.secretKey
+		);
 
-let users = require('./users.json');
+		this.sock.emit('exec', [...cipher]);
+	}
+
+	parse (command) {
+		if (!command.length) {
+			return this.commitMessage('Command must not be empty.');
+		}
+
+		console.log(command);
+
+		return this.commitMessage('Unknown command.');
+	}
+}
 
 io.on('connection', sock => {
-	let user = {};
+	const user = {};
+	const handler = new Handler({
+		sock, user
+	});
 
-	sock.on('handshake', (packet, checksum) => {
-		if (packet && checksum) {
+	sock.on('handshake', packet => {
+		if (packet) {
 			try {
-				// verify checksum
-				if (helpers.bsd16(packet) !== checksum)
-					throw new Error('Bad checksum.');
-
 				// unpack payload
-				let upacket = packet.split('').map((item) => item.charCodeAt(0));
-				    upacket = msgpack.unpack(new Buffer(upacket));
+				let upacket = helpers.unpackChunk(packet);
 
 				if (!(upacket.user in users))
 					throw new Error('Invalid user.');
@@ -43,17 +85,17 @@ io.on('connection', sock => {
 				 && helpers.isArray(upacket.nonce, 24)
 				 && helpers.isArray(upacket.publicKey, 32)
 				) {
-					let nonce = new Buffer(upacket.nonce);
-					let publicKey = new Buffer(upacket.publicKey);
+					const nonce = new Buffer(upacket.nonce);
+					const publicKey = new Buffer(upacket.publicKey);
 
 					/* Auth(H(nonce, secret) λ publickey) */
-					let authedHandshake = new Buffer(upacket.authedHandshake);
+					const authedHandshake = new Buffer(upacket.authedHandshake);
 
 					// sha256 hash of secret
-					let secretHash = crypto.createHash('sha256').update(users[upacket.user].secret).digest();
+					const secretHash = crypto.createHash('sha256').update(users[upacket.user].secret).digest();
 
 					// verify that user is in possession of correct hash
-					if (sodium.api.crypto_auth_verify(authedHandshake, nonce, secretHash)) {
+					if (helpers.verifyAuthenticatedChunk(authedHandshake, nonce, secretHash)) {
 						throw new Error('Invalid secret.');
 					}
 
@@ -70,11 +112,11 @@ io.on('connection', sock => {
 
 					sodium.api.randombytes_buf(user.bob.nonce);
 
-					sock.emit('rpc', msgpack.pack({
+					sock.emit('rpc', helpers.packChunk({
 						type: 'handshake',
 						// used for ed25519
-						publicKey: arr(user.bob.publicKey),
-						nonce: arr(user.bob.nonce)
+						publicKey: [...user.bob.publicKey],
+						nonce: [...user.bob.nonce]
 					}));
 				}
 			} catch(e) {
@@ -84,7 +126,9 @@ io.on('connection', sock => {
 	});
 
 	sock.on('post-handshake', cipher => {
-		let plaintext = String.fromCharCode.apply(String, sodium.api.crypto_box_open_easy(
+		cipher = helpers.unpackChunk(cipher);
+
+		const plaintext = String.fromCharCode.apply(String, sodium.api.crypto_box_open_easy(
 			new Buffer(cipher),
 			user.alice.nonce,
 			user.alice.publicKey,
@@ -94,28 +138,39 @@ io.on('connection', sock => {
 		if (plaintext === 'init') {
 			user.alice.authenticated = true;
 
-			sock.emit('post-auth', user.alice.userName, arr(sodium.api.crypto_auth(user.bob.nonce, user.alice.secretHash)));
+			sock.emit('post-auth', user.alice.userName, [...sodium.api.crypto_auth(user.bob.nonce, user.alice.secretHash)]);
 		}
 	});
 
-	sock.on('command', cmd => {
+	sock.on('command', (cipher, tag) => {
 		if (!user.alice.authenticated) {
 			return;
 		}
 
+		const packedCommand = String.fromCharCode.apply(String, sodium.api.crypto_box_open_easy(
+			new Buffer(cipher),
+			user.alice.nonce,
+			user.alice.publicKey,
+			user.bob.secretKey
+		));
+
+		if (!helpers.verifyAuthenticatedIntegrityChunk(packedCommand, tag, user.alice.secretHash)) {
+			return sock.emit('err', 'Invalid integrity for command.');
+		}
+
+		const command = JSON.parse(packedCommand);
+
 		if (users[user.alice.userName].yubi && !user.alice.yubiAuthenticated) {
-			if (cmd.length !== 2 || cmd[0] !== 'yubi') {
+			if (command.length !== 2 || command[0] !== 'yubi') {
 				return sock.emit('err', `'${user.alice.userName}' requires yubikey authentication.`);
 			}
 
-			yubi.verify(cmd[1], function(err, data) {
+			yubi.verify(command[1], (err, data) => {
 				if (err) {
 					return sock.emit('err', err.message);
 				}
 
-				let userYubi = users[user.alice.userName].yubi;
-
-				console.log(userYubi, data);
+				const userYubi = users[user.alice.userName].yubi;
 
 				if (!data.valid || data.serial !== userYubi.serial || data.identity !== userYubi.identity) {
 					return sock.emit('err', 'OTP rejected.');
@@ -127,14 +182,14 @@ io.on('connection', sock => {
 			});
 		}
 
-		return sock.emit('info', 'Hi.');
+		handler.parse(command);
 	});
 
 	sock.error(err => console.log(err));
 });
 
 
-let assetSource = './static';
+const assetSource = './static';
 
 console.log('Using \'%s\' for static assets.', assetSource);
 

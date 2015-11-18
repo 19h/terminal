@@ -1,5 +1,8 @@
 'use strict';
 
+//require("babel-polyfill");
+//let Promise = require('./bluebird/js/browser/bluebird.js');
+
 let events = require('./events.js');
 
 let msgpack = require('./msgpack.js');
@@ -96,9 +99,9 @@ class TerminalLineFeed {
 
 		this.lineFeed.slice(this.lineFeed.indexOf(lastCommandLine)).forEach(line => {
 			this.remove(line);
-		})
+		});
 	}
-};
+}
 
 class Terminal extends events {
 	constructor () {
@@ -247,7 +250,7 @@ class apx extends events {
 		super();
 
 		this.helpers = {
-			bsd16: arr => {
+			bsd16 (arr) {
 				let c = 0,
 					i = 0,
 					l = arr.length;
@@ -255,6 +258,10 @@ class apx extends events {
 				for (; i < l; i++) c = (((((c >>> 1) + ((c & 1) << 15)) | 0) + (arr[i] & 0xff)) & 0xffff) | 0;
 
 				return c;
+			},
+
+			checkedChunk (seed) {
+				return String.fromCharCode(...msgpack.encode(seed));
 			}
 		};
 
@@ -321,6 +328,12 @@ class apx extends events {
 		this.io.on('err', writeAndFlush);
 		this.io.on('info', writeAndFlush);
 
+		this.io.on('exec', cipher => {
+			const msg = msgpack.decode(sodium.crypto_box_open_easy(Uint8Array.from(cipher), this.bob.nonce, this.bob.publicKey, this.alice.keypair.privateKey));
+
+			writeAndFlush(msg);
+		});
+
 		this.io.on('post-auth', (user, postAuth) => {
 			if (sodium.crypto_auth_verify(Uint8Array.from(postAuth), this.bob.nonce, this.alice.secretHash)) {
 				this.authenticated = true;
@@ -359,7 +372,9 @@ class apx extends events {
 			this.alice.keypair.privateKey
 		);
 
-		this.io.emit('post-handshake', [...cipher]);
+		let packet = this.helpers.checkedChunk([...cipher]);
+
+		this.io.emit('post-handshake', packet);
 	}
 
 	handshake () {
@@ -372,10 +387,9 @@ class apx extends events {
 			authedHandshake: [...this.alice.authedHandshake]
 		};
 
-		let packet = String.fromCharCode.apply(null, msgpack.encode(seed)),
-		  checksum = this.helpers.bsd16(packet);
+		let packet = this.helpers.checkedChunk(seed);
 
-		this.io.emit('handshake', packet, checksum);
+		this.io.emit('handshake', packet);
 	}
 
 	bufcmp (buf1, buf2) {
@@ -394,7 +408,20 @@ class apx extends events {
 			let _msg = msg.trim().split(' ');
 
 			if (this.authenticated) {
-				this.io.emit('command', _msg);
+				let plaintext = JSON.stringify(_msg);
+
+				let cipher = sodium.crypto_box_easy(
+					plaintext,
+					this.alice.nonce,
+					this.bob.publicKey,
+					this.alice.keypair.privateKey
+				);
+
+				let packet = this.helpers.checkedChunk(cipher);
+
+				const tag = sodium.crypto_auth(packet, this.alice.secretHash);
+
+				this.io.emit('command', [...cipher], [...tag]);
 			} else {
 				if (_msg.length !== 2 || _msg[0] !== 'login') {
 					this.terminal.write('Not authenticated.');
